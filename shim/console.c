@@ -25,7 +25,12 @@ static int row;
 void con_refresh(void)
 {
 #ifdef X670
+	volatile uint32_t *disp_cfg = (volatile uint32_t *)0x14000000UL;
 	volatile uint32_t *dsi = (volatile uint32_t *)0x14013000UL;
+	/* MediaTek's command-mode trigger first queues DCS WRITE_MEMORY_START. */
+	disp_cfg[0x0f0 / 4] = 0x14;        /* MMSYS_MISC: FHD, unsplit path */
+	dsi[0x200 / 4] = 0x002c3909;      /* DSI CMDQ: one DCS 0x2c packet */
+	dsi[0x060 / 4] = 1;               /* one command queue word */
 	__asm__ volatile("dsb sy" ::: "memory");
 	dsi[0] = 0;
 	dsi[0] = 1;

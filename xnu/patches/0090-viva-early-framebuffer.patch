@@ -80,7 +80,7 @@ index 023086f..a40c43b 100644
  	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
  	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 6928957..fd2868b 100644
+index 6928957..36a286b 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -1,5 +1,5 @@
@@ -106,7 +106,7 @@ index 6928957..fd2868b 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
-@@ -28,6 +29,21 @@ extern unsigned char iso_font[256 * 16];
+@@ -28,6 +29,40 @@ extern unsigned char iso_font[256 * 16];
  static unsigned int early_row, early_col;
  static unsigned int early_started, early_disabled, early_panicking;
  
@@ -118,7 +118,26 @@ index 6928957..fd2868b 100644
 +	if (early_dsi == 0) {
 +		return;
 +	}
-+	/* Trigger one frame on LK's configured DSI host; do not reconfigure clocks. */
++	/* Do not overwrite the DSI command queue while its prior frame is active. */
++	uint64_t start, now, freq;
++	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(start));
++	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
++	for (;;) {
++		if ((early_dsi[0x00c / 4] & 0x80000000u) == 0) {
++			break;
++		}
++		__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(now));
++		if (now - start > freq / 10) {
++			return;
++		}
++	}
++	/* Match MTK's command-mode DSI trigger: set the FHD route, queue DCS
++	 * WRITE_MEMORY_START (0x2c), then start the transfer on LK's live path. */
++	volatile uint32_t *disp_cfg = (volatile uint32_t *)
++	    ((uintptr_t)early_dsi - 0x13000u);
++	disp_cfg[0x0f0 / 4] = 0x14;       /* MMSYS_MISC */
++	early_dsi[0x200 / 4] = 0x002c3909; /* DSI_CMDQ data[0] */
++	early_dsi[0x060 / 4] = 1;          /* one command queue word */
 +	__asm__ volatile("dsb sy" ::: "memory");
 +	early_dsi[0] = 0;
 +	early_dsi[0] = 1;
@@ -128,7 +147,7 @@ index 6928957..fd2868b 100644
  static void
  sweet_early_clear_row(void)
  {
-@@ -57,6 +73,7 @@ sweet_early_putc(char c)
+@@ -57,6 +92,7 @@ sweet_early_putc(char c)
  		early_col = 0;
  		early_row = (early_row + 1) % EARLY_ROWS;
  		sweet_early_clear_row();
@@ -136,7 +155,7 @@ index 6928957..fd2868b 100644
  		if (c == '\n') {
  			return;
  		}
-@@ -126,10 +143,11 @@ sweet_early_panic(const char *fmt, va_list *args)
+@@ -126,10 +162,11 @@ sweet_early_panic(const char *fmt, va_list *args)
  }
  
  void

@@ -33,7 +33,7 @@ index c779745..c6ca9ef 100644
   * Boot-arg vivausb: 0 (default) off, 1 probe, 2 probe then panic with the
 - * summary (the panic screen keeps it visible).
 + * summary (the panic screen keeps it visible), 3 probe then start the
-+ * "viva link" (step 2, below).
++ * "viva link" (step 2, below); vivausb=4 forces full speed for diagnosis.
   */
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
@@ -48,22 +48,23 @@ index c779745..c6ca9ef 100644
 -extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);  /* not exported to the BSD layer */
  void viva_usb_probe(void);
-+static void viva_link_start(vm_offset_t tphy, vm_offset_t musb);
++static void viva_link_start(vm_offset_t tphy, vm_offset_t musb, bool force_fs);
  
  #define INFRA_AO_PA     0x10001000u
  #define INFRA_CG_STA0   0x90
-@@ -90,5 +96,633 @@ viva_usb_probe(void)
+@@ -90,5 +96,635 @@ viva_usb_probe(void)
  		    cg0, cg1, cg2, cg3, acr0, acr6, acr4, dtm0, dtm1,
  		    hwvers, epinfo, faddr, power, devctl, intrusbe, txe, rxe, l1intm);
  	}
-+	if (mode == 3) {
-+		viva_link_start(tphy, musb);
++	if (mode == 3 || mode == 4) {
++		viva_link_start(tphy, musb, mode == 4);
 +	}
 +}
 +/*
 + * Step 2: "viva link" (vivausb=3), a vendor-class USB device for logs and
 + * commands. One interface, bulk IN 0x81 and bulk OUT 0x01. Every IN packet
 + * is one frame: 'V', type, u16 payload length (little endian), payload.
++ * vivausb=4 forces full speed to isolate high-speed negotiation failures.
 + * Types: 'L' console log bytes (the ring in bsd/dev/sweet_ufs.c, from the
 + * start of the boot), 'R' command reply text, 'E' end of a reply. Every OUT
 + * packet is one text command (see vl_command). Host side: tools/viva-link.py.
@@ -632,7 +633,7 @@ index c779745..c6ca9ef 100644
 +}
 +
 +static void
-+viva_link_start(vm_offset_t tphy, vm_offset_t musb)
++viva_link_start(vm_offset_t tphy, vm_offset_t musb, bool force_fs)
 +{
 +	thread_t thread;
 +
@@ -677,8 +678,9 @@ index c779745..c6ca9ef 100644
 +	wr16(musb, MUSB_INTRRXE, 0x0002);               /* ep1 OUT */
 +	wr8(musb, MUSB_INTRUSBE, INTR_RESET | INTR_RESUME | INTR_SUSPEND | INTR_DISCON);
 +	wr8(musb, MUSB_DEVCTL, rd8(musb, MUSB_DEVCTL) | DEVCTL_SESSION);
-+	wr8(musb, MUSB_POWER, POWER_HSENAB | POWER_SOFTCONN);
-+	printf("VIVA LINK: connected (power 0x%02x devctl 0x%02x), waiting for the host\n",
++	wr8(musb, MUSB_POWER, (force_fs ? 0 : POWER_HSENAB) | POWER_SOFTCONN);
++	printf("VIVA LINK: connected (%s; power 0x%02x devctl 0x%02x), waiting for the host\n",
++	    force_fs ? "forced full speed" : "high-speed enabled",
 +	    rd8(musb, MUSB_POWER), rd8(musb, MUSB_DEVCTL));
 +
 +	if (kernel_thread_start(vl_thread, NULL, &thread) == KERN_SUCCESS) {
