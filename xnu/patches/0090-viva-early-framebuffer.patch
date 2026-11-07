@@ -135,6 +135,9 @@ index 6928957..36a286b 100644
 +	 * WRITE_MEMORY_START (0x2c), then start the transfer on LK's live path. */
 +	volatile uint32_t *disp_cfg = (volatile uint32_t *)
 +	    ((uintptr_t)early_dsi - 0x13000u);
++	volatile uint32_t *disp_mutex = (volatile uint32_t *)
++	    ((uintptr_t)early_dsi - 0x12000u);
++	disp_mutex[0x020 / 4] = 1;          /* mutex0 enable before DSI trigger */
 +	disp_cfg[0x0f0 / 4] = 0x14;       /* MMSYS_MISC */
 +	early_dsi[0x200 / 4] = 0x002c3909; /* DSI_CMDQ data[0] */
 +	early_dsi[0x060 / 4] = 1;          /* one command queue word */

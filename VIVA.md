@@ -35,8 +35,8 @@ addresses are other blocks on MT6781. Only `boot_b` is ever flashed.
 
 ```sh
 # kernel (GitHub Actions, macos-14)
-gh workflow run xnu.yml -R YOU/ios-viva --ref viva
-gh run download RUN_ID -R YOU/ios-viva -n xnu-kernel -D xnu/out
+gh workflow run xnu.yml -R YOU/ios-scorpion --ref viva
+gh run download RUN_ID -R YOU/ios-scorpion -n xnu-kernel -D xnu/out
 # boot image (stock boot.img from the viva fastboot ROM, EEA OS1.0.3.0.TGDEUXM)
 tools/viva-mkboot.sh xnu/out/kernel.development.sweet STOCK/boot.img STAGE
 fastboot flash boot_b shim/out/viva-boot.img
