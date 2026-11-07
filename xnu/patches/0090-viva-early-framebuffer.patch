@@ -106,7 +106,7 @@ index 6928957..36a286b 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
-@@ -28,6 +29,40 @@ extern unsigned char iso_font[256 * 16];
+@@ -28,6 +29,43 @@ extern unsigned char iso_font[256 * 16];
  static unsigned int early_row, early_col;
  static unsigned int early_started, early_disabled, early_panicking;
  
@@ -150,7 +150,7 @@ index 6928957..36a286b 100644
  static void
  sweet_early_clear_row(void)
  {
-@@ -57,6 +92,7 @@ sweet_early_putc(char c)
+@@ -57,6 +95,7 @@ sweet_early_putc(char c)
  		early_col = 0;
  		early_row = (early_row + 1) % EARLY_ROWS;
  		sweet_early_clear_row();
@@ -158,7 +158,7 @@ index 6928957..36a286b 100644
  		if (c == '\n') {
  			return;
  		}
-@@ -126,10 +162,11 @@ sweet_early_panic(const char *fmt, va_list *args)
+@@ -126,10 +165,11 @@ sweet_early_panic(const char *fmt, va_list *args)
  }
  
  void
