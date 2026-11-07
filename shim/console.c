@@ -15,6 +15,24 @@ volatile uint32_t *con_fb = (volatile uint32_t *)FB_BASE;
 static uint32_t con_bg;
 static int row;
 
+/*
+ * On X670 the panel is command-mode. The framebuffer is only the source for
+ * the MTK display pipe; the DDIC keeps the last frame in its own GRAM until
+ * the DSI command-mode transfer is kicked. LK leaves the OVL/DSI pipeline
+ * configured, so retrigger DSI without relying on status bits whose values
+ * vary across boot stages. This is X670-only.
+ */
+void con_refresh(void)
+{
+#ifdef X670
+	volatile uint32_t *dsi = (volatile uint32_t *)0x14013000UL;
+	__asm__ volatile("dsb sy" ::: "memory");
+	dsi[0] = 0;
+	dsi[0] = 1;
+	__asm__ volatile("dsb sy" ::: "memory");
+#endif
+}
+
 void con_clear(uint32_t bg)
 {
 	for (int y = 0; y < FB_H; y++) {

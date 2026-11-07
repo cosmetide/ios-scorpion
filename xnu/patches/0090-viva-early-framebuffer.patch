@@ -80,7 +80,7 @@ index 023086f..a40c43b 100644
  	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
  	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
-index 6928957..760f692 100644
+index 6928957..fd2868b 100644
 --- a/osfmk/arm64/sweet_early.c
 +++ b/osfmk/arm64/sweet_early.c
 @@ -1,5 +1,5 @@
@@ -106,7 +106,7 @@ index 6928957..760f692 100644
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
-@@ -28,6 +29,25 @@ extern unsigned char iso_font[256 * 16];
+@@ -28,6 +29,21 @@ extern unsigned char iso_font[256 * 16];
  static unsigned int early_row, early_col;
  static unsigned int early_started, early_disabled, early_panicking;
  
@@ -118,11 +118,7 @@ index 6928957..760f692 100644
 +	if (early_dsi == 0) {
 +		return;
 +	}
-+	/* DSI_CON_CTRL.EN must still be set; do not bring up clocks from here. */
-+	if ((early_dsi[0x10 / 4] & (1u << 1)) == 0 ||
-+	    (early_dsi[0x14 / 4] & 3u) != 0) {
-+		return;
-+	}
++	/* Trigger one frame on LK's configured DSI host; do not reconfigure clocks. */
 +	__asm__ volatile("dsb sy" ::: "memory");
 +	early_dsi[0] = 0;
 +	early_dsi[0] = 1;
@@ -132,7 +128,7 @@ index 6928957..760f692 100644
  static void
  sweet_early_clear_row(void)
  {
-@@ -57,6 +77,7 @@ sweet_early_putc(char c)
+@@ -57,6 +73,7 @@ sweet_early_putc(char c)
  		early_col = 0;
  		early_row = (early_row + 1) % EARLY_ROWS;
  		sweet_early_clear_row();
@@ -140,7 +136,7 @@ index 6928957..760f692 100644
  		if (c == '\n') {
  			return;
  		}
-@@ -126,10 +147,11 @@ sweet_early_panic(const char *fmt, va_list *args)
+@@ -126,10 +143,11 @@ sweet_early_panic(const char *fmt, va_list *args)
  }
  
  void
