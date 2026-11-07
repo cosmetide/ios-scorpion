@@ -1,0 +1,466 @@
+﻿diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/bsd/dev/sweet_sd.c
+@@ -0,0 +1,408 @@
++/*
++ * SWEET X670 removable microSD root device.
++ *
++ * This is a polled, read-only MT6781 MSDC1 host driver. It uses the board's
++ * fixed pin/clock/PMIC wiring, initializes a standard SD card in 1-bit mode
++ * before switching to 4-bit mode at a conservative clock, reads GPT, and
++ * exposes the named HFS+ partition as /dev/sdroot0. No write command is sent.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <kern/kalloc.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int viva_pwrap_write_regulator(uint32_t, uint32_t, uint32_t);
++
++#define R_CFG       0x000
++#define R_IOCON     0x004
++#define R_PS        0x008
++#define R_INT       0x00c
++#define R_INTEN     0x010
++#define R_FIFOCS    0x014
++#define R_RXDATA    0x020
++#define R_SDC_CFG   0x030
++#define R_SDC_CMD   0x034
++#define R_SDC_ARG   0x038
++#define R_SDC_STS   0x03c
++#define R_RESP0     0x040
++#define R_RESP1     0x044
++#define R_RESP2     0x048
++#define R_RESP3     0x04c
++#define R_BLK_NUM   0x050
++
++#define CFG_MODE        (1u << 0)
++#define CFG_CKPDN       (1u << 1)
++#define CFG_RST         (1u << 2)
++#define CFG_PIO         (1u << 3)
++#define CFG_CKSTB       (1u << 7)
++#define CFG_CKDIV_MASK  (0xfffu << 8)
++#define CFG_CKMOD_MASK  (3u << 16)
++#define INT_CMDRDY      (1u << 8)
++#define INT_CMDTMO      (1u << 9)
++#define INT_RSPCRCERR   (1u << 10)
++#define INT_XFER_COMPL  (1u << 12)
++#define INT_DATTMO      (1u << 14)
++#define INT_DATCRCERR   (1u << 15)
++#define FIFO_RXCNT      0xffu
++#define SDC_CMDBUSY     (1u << 1)
++
++#define SD_SECTOR       512u
++#define SD_GPT_MAX_ENT  128u
++#define SD_CMD(op, rsp, len, dtype) ((op) | ((rsp) << 7) | ((dtype) << 11) | ((len) << 16))
++
++static struct {
++	vm_offset_t regs, gpio, iocfg, topckgen, infracfg;
++	uint8_t *bounce;
++	uint32_t rca;
++	uint64_t first, count;
++	int bmajor, cmajor;
++	dev_t bdev;
++	bool high_capacity, ready;
++} sd;
++
++static LCK_GRP_DECLARE(sweet_sd_grp, "sweet_sd");
++static LCK_MTX_DECLARE(sweet_sd_lock, &sweet_sd_grp);
++
++static inline uint32_t sd_rd(uint32_t off) { return *(volatile uint32_t *)(sd.regs + off); }
++static inline void sd_wr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(sd.regs + off) = v; }
++static inline uint32_t mm_rd(vm_offset_t b, uint32_t o) { return *(volatile uint32_t *)(b + o); }
++static inline void mm_wr(vm_offset_t b, uint32_t o, uint32_t v) { *(volatile uint32_t *)(b + o) = v; }
++
++static void
++sd_pin_clock_init(void)
++{
++	/* GPIO mux mode: pins 85..90 are MSDC1 CLK, DAT3, CMD, DAT0..2. */
++	uint32_t v = mm_rd(sd.gpio, 0x3a0);
++	mm_wr(sd.gpio, 0x3a0, (v & ~0xfff00000u) | 0x11100000u);
++	v = mm_rd(sd.gpio, 0x3b0);
++	mm_wr(sd.gpio, 0x3b0, (v & ~0x00000fffu) | 0x00000111u);
++
++	/* IOCFG_BL is bank 3 (0x10002600); per-pin registers are 0x10 apart.
++	 * Enable input and Schmitt paths without changing the board's pull settings.
++	 */
++	for (unsigned int pin = 0; pin < 6; pin++) {
++		uint32_t ies = mm_rd(sd.iocfg, 0x10 + pin * 0x10);
++		uint32_t smt = mm_rd(sd.iocfg, 0x80 + pin * 0x10);
++		mm_wr(sd.iocfg, 0x10 + pin * 0x10, ies | 1u);
++		mm_wr(sd.iocfg, 0x80 + pin * 0x10, smt | 1u);
++	}
++
++	/* Select 26 MHz parent for MSDC1; ungate its HCLK and source clock. */
++	mm_wr(sd.topckgen, 0x78, 7u << 16);
++	mm_wr(sd.topckgen, 0x74, 0);
++	mm_wr(sd.topckgen, 0x04, 1u << 14);
++	mm_wr(sd.infracfg, 0x8c, (1u << 4) | (1u << 16));
++	__builtin_arm_dsb(0xf);
++}
++
++static int
++sd_power_init(void)
++{
++	int e = 0;
++	/* X670 rails from the stock DT: VMC 3.0 V, VMCH_EINT_LOW 3.0 V. */
++	e |= viva_pwrap_write_regulator(0x1e4c, 0x0fff, 0x0b00);
++	e |= viva_pwrap_write_regulator(0x1cc4, 0x0001, 0x0001);
++	e |= viva_pwrap_write_regulator(0x1e48, 0x0700, 0x0300);
++	e |= viva_pwrap_write_regulator(0x1cd8, 0x0001, 0x0001);
++	if (e) return ENXIO;
++	delay(1500);
++	return viva_pwrap_write_regulator(0x1d70, 0x0005, 0x0001) ? ENXIO : 0;
++}
++
++static int
++sd_wait_int(uint32_t mask, uint32_t *status, uint32_t loops)
++{
++	while (loops--) {
++		uint32_t v = sd_rd(R_INT);
++		if (v & mask) {
++			*status = v;
++			sd_wr(R_INT, v);
++			return 0;
++		}
++		delay(1);
++	}
++	return ETIMEDOUT;
++}
++
++static int
++sd_command(uint32_t opcode, uint32_t arg, uint32_t rsp, uint32_t *response)
++{
++	uint32_t v, status;
++	for (unsigned i = 0; i < 10000; i++) {
++		if (!(sd_rd(R_SDC_STS) & SDC_CMDBUSY)) break;
++		if (i == 9999) return EBUSY;
++		delay(1);
++	}
++	sd_wr(R_INT, sd_rd(R_INT));
++	sd_wr(R_SDC_ARG, arg);
++	sd_wr(R_SDC_CMD, SD_CMD(opcode, rsp, 0, 0));
++	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) return ETIMEDOUT;
++	if (status & (INT_CMDTMO | INT_RSPCRCERR)) return EIO;
++	if (response) {
++		v = sd_rd(R_RESP0);
++		*response = v;
++	}
++	return 0;
++}
++
++static int
++sd_read_sector(uint64_t lba, uint8_t *out)
++{
++	uint32_t arg, status, raw, got = 0;
++	if (!sd.high_capacity && lba > (UINT32_MAX / SD_SECTOR)) return EINVAL;
++	arg = sd.high_capacity ? (uint32_t)lba : (uint32_t)(lba * SD_SECTOR);
++	if ((uint64_t)arg != (sd.high_capacity ? lba : lba * SD_SECTOR)) return EINVAL;
++	sd_wr(R_FIFOCS, 1u << 31);
++	sd_wr(R_BLK_NUM, 1);
++	sd_wr(R_SDC_ARG, arg);
++	raw = SD_CMD(17, 1, SD_SECTOR, 1);
++	sd_wr(R_SDC_CMD, raw);
++	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) return ETIMEDOUT;
++	if (status & (INT_CMDTMO | INT_RSPCRCERR)) return EIO;
++	for (uint32_t loops = 0; loops < 5000000; loops++) {
++		uint32_t intr = sd_rd(R_INT);
++		uint32_t avail = sd_rd(R_FIFOCS) & FIFO_RXCNT;
++		while (avail >= 4 && got + 4 <= SD_SECTOR) {
++			uint32_t word = sd_rd(R_RXDATA);
++			out[got++] = (uint8_t)word;
++			out[got++] = (uint8_t)(word >> 8);
++			out[got++] = (uint8_t)(word >> 16);
++			out[got++] = (uint8_t)(word >> 24);
++			avail -= 4;
++		}
++		if (intr & (INT_DATTMO | INT_DATCRCERR)) {
++			sd_wr(R_INT, intr);
++			return EIO;
++		}
++		if (intr & INT_XFER_COMPL) {
++			sd_wr(R_INT, intr);
++			return got == SD_SECTOR ? 0 : EIO;
++		}
++		if (intr) sd_wr(R_INT, intr & (INT_DATTMO | INT_DATCRCERR));
++		delay(1);
++	}
++	return ETIMEDOUT;
++}
++
++static int
++sd_init_card(void)
++{
++	uint32_t r = 0, ocr = 0;
++	int error;
++	uint32_t cfg = sd_rd(R_CFG);
++	sd_wr(R_CFG, cfg | CFG_RST);
++	for (unsigned i = 0; i < 10000 && (sd_rd(R_CFG) & CFG_RST); i++) delay(1);
++	sd_wr(R_CFG, (sd_rd(R_CFG) & ~(CFG_CKDIV_MASK | CFG_CKMOD_MASK)) | CFG_MODE | CFG_PIO | (17u << 8));
++	sd_wr(R_CFG, sd_rd(R_CFG) & ~CFG_CKPDN);
++	for (unsigned i = 0; i < 100000 && !(sd_rd(R_CFG) & CFG_CKSTB); i++) delay(1);
++	if (!(sd_rd(R_CFG) & CFG_CKSTB)) return ETIMEDOUT;
++	sd_wr(R_CFG, sd_rd(R_CFG) | CFG_CKPDN);
++	sd_wr(R_SDC_CFG, 3u << 24); /* long data timeout; one-bit bus initially */
++	sd_wr(R_INTEN, 0);
++	sd_wr(R_INT, sd_rd(R_INT));
++	delay(10000);
++	if ((error = sd_command(0, 0, 0, NULL))) return error;
++	/* CMD8 is optional on older SD cards. */
++	if (sd_command(8, 0x1aa, 1, &r) == 0 && (r & 0xfff) == 0x1aa)
++		sd.high_capacity = true;
++	for (unsigned i = 0; i < 1000; i++) {
++		if (sd_command(55, 0, 1, &r)) return EIO;
++		if (sd_command(41, sd.high_capacity ? 0x40ff8000 : 0x00ff8000, 3, &ocr)) return EIO;
++		if (ocr & 0x80000000) break;
++		delay(1000);
++		if (i == 999) return ETIMEDOUT;
++	}
++	if (sd.high_capacity && !(ocr & 0x40000000)) sd.high_capacity = false;
++	if ((error = sd_command(2, 0, 2, NULL))) return error;
++	if ((error = sd_command(3, 0, 1, &r))) return error;
++	sd.rca = r & 0xffff0000;
++	if (!sd.rca) return EIO;
++	if ((error = sd_command(7, sd.rca, 7, &r))) return error;
++	if (!sd.high_capacity && (error = sd_command(16, SD_SECTOR, 1, &r))) return error;
++	if ((error = sd_command(55, sd.rca, 1, &r))) return error;
++	if ((error = sd_command(6, 2, 1, &r))) return error; /* ACMD6: 4-bit */
++	sd_wr(R_SDC_CFG, (sd_rd(R_SDC_CFG) & ~(3u << 16)) | (1u << 16));
++	/* Keep the host clock deliberately conservative until tuning exists. */
++	sd_wr(R_CFG, sd_rd(R_CFG) & ~(CFG_CKDIV_MASK | CFG_CKMOD_MASK));
++	sd_wr(R_CFG, sd_rd(R_CFG) | (1u << 8));
++	return 0;
++}
++
++static int
++sd_find_partition(const char *wanted)
++{
++	uint8_t *b = sd.bounce;
++	uint64_t ent_lba;
++	uint32_t nent, esz;
++	int error = sd_read_sector(1, b);
++	if (error) return error;
++	if (memcmp(b, "EFI PART", 8)) return ENXIO;
++	memcpy(&ent_lba, b + 72, sizeof(ent_lba));
++	memcpy(&nent, b + 80, sizeof(nent));
++	memcpy(&esz, b + 84, sizeof(esz));
++	if (!nent || nent > SD_GPT_MAX_ENT || esz != 128) return EINVAL;
++	uint64_t cached = UINT64_MAX;
++	for (uint32_t i = 0; i < nent; i++) {
++		uint64_t this_lba = ent_lba + (i / 4);
++		if (this_lba != cached) {
++			if ((error = sd_read_sector(this_lba, b))) return error;
++			cached = this_lba;
++		}
++		const uint8_t *e = b + (i % 4) * 128;
++		if (!memcmp(e, (uint8_t[16]){0}, 16)) continue;
++		char name[37];
++		unsigned j;
++		for (j = 0; j < 36; j++) {
++			uint16_t c = (uint16_t)e[56 + j * 2] | (uint16_t)e[57 + j * 2] << 8;
++			if (!c || c > 0x7f) break;
++			name[j] = (char)c;
++		}
++		name[j] = 0;
++		if (strcmp(name, wanted)) continue;
++		memcpy(&sd.first, e + 32, 8);
++		uint64_t last;
++		memcpy(&last, e + 40, 8);
++		if (last < sd.first) return EINVAL;
++		sd.count = last - sd.first + 1;
++		return 0;
++	}
++	printf("SWEET SD: GPT partition '%s' not found\n", wanted);
++	return ENOENT;
++}
++
++static int sd_open(__unused dev_t d, int f, __unused int t, __unused struct proc *p) { return !sd.ready ? ENXIO : ((f & FWRITE) ? EROFS : 0); }
++static int sd_close(__unused dev_t d, __unused int f, __unused int t, __unused struct proc *p) { return 0; }
++
++static void
++sd_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t va = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * DEV_BSIZE;
++	uint32_t count = buf_count(bp);
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) { error = EROFS; goto done; }
++	if (off > sd.count * SD_SECTOR || count > sd.count * SD_SECTOR - off) { error = EINVAL; goto done; }
++	if (!count) goto done;
++	if (buf_map(bp, &va)) { error = EIO; goto done; }
++	lck_mtx_lock(&sweet_sd_lock);
++	for (uint32_t copied = 0; copied < count;) {
++		uint64_t pos = off + copied;
++		uint32_t skip = (uint32_t)(pos % SD_SECTOR);
++		uint32_t n = MIN(count - copied, SD_SECTOR - skip);
++		error = sd_read_sector(sd.first + pos / SD_SECTOR, sd.bounce);
++		if (error) break;
++		memcpy(va + copied, sd.bounce + skip, n);
++		copied += n;
++		buf_setresid(bp, count - copied);
++	}
++	lck_mtx_unlock(&sweet_sd_lock);
++	buf_unmap(bp);
++done:
++	if (error) buf_seterror(bp, error);
++	buf_biodone(bp);
++}
++
++static int
++sd_ioctl(__unused dev_t d, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p, int ch)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE: *f = DEV_BSIZE; return 0;
++	case DKIOCSETBLOCKSIZE: return ch ? ENODEV : (*f == DEV_BSIZE ? 0 : EINVAL);
++	case DKIOCGETPHYSICALBLOCKSIZE: *f = SD_SECTOR; return 0;
++	case DKIOCGETBLOCKCOUNT: *o = sd.count * SD_SECTOR / DEV_BSIZE; return 0;
++	case DKIOCISWRITABLE: *f = 0; return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD: *o = 128; return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE: *o = 0; return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE: *o = 1; return 0;
++	default: return ENOTTY;
++	}
++}
++static int sd_bioctl(dev_t d, u_long c, caddr_t a, int f, struct proc *p) { return sd_ioctl(d,c,a,f,p,0); }
++static int sd_cioctl(dev_t d, u_long c, caddr_t a, int f, struct proc *p) { return sd_ioctl(d,c,a,f,p,1); }
++static int sd_psize(__unused dev_t d) { return sd.ready ? (int)MIN(sd.count * SD_SECTOR / DEV_BSIZE, INT_MAX) : -1; }
++static int sd_read(dev_t d, struct uio *u, __unused int f) { return physio(sd_strategy, NULL, d, B_READ, minphys, u, DEV_BSIZE); }
++static int sd_write(__unused dev_t d, __unused struct uio *u, __unused int f) { return EROFS; }
++
++static const struct bdevsw sweet_sd_bdevsw = {
++	.d_open = sd_open, .d_close = sd_close, .d_strategy = sd_strategy,
++	.d_ioctl = sd_bioctl, .d_dump = eno_dump, .d_psize = sd_psize, .d_type = D_DISK,
++};
++static const struct cdevsw sweet_sd_cdevsw = {
++	.d_open = sd_open, .d_close = sd_close, .d_read = sd_read, .d_write = sd_write,
++	.d_ioctl = sd_cioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_ttys = NULL,
++	.d_select = eno_select, .d_mmap = eno_mmap, .d_strategy = eno_strat,
++	.d_reserved_1 = eno_getc, .d_reserved_2 = eno_putc, .d_type = D_DISK,
++};
++
++static int
++sweet_sd_init(void)
++{
++	DTEntry node;
++	char part[64] = "iosroot";
++	unsigned int sz = 0;
++	uintptr_t const *reg = NULL;
++	if (SecureDTLookupEntry(NULL, "/sweet-sd", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &sz) != kSuccess || sz < 4 * sizeof(uintptr_t)) {
++		printf("SWEET SD: no /sweet-sd device-tree node\n"); return ENXIO;
++	}
++	PE_parse_boot_argn("sdroot", part, sizeof(part));
++	sd.regs = ml_io_map(reg[0], reg[1]);
++	sd.gpio = ml_io_map(0x10005000, 0x1000);
++	sd.iocfg = ml_io_map(0x10002600, 0x1000);
++	sd.topckgen = ml_io_map(0x10000000, 0x1000);
++	sd.infracfg = ml_io_map(0x10001000, 0x1000);
++	if (!sd.regs || !sd.gpio || !sd.iocfg || !sd.topckgen || !sd.infracfg) return ENXIO;
++	sd.bounce = (uint8_t *)kalloc_data(SD_SECTOR, Z_WAITOK | Z_ZERO);
++	if (!sd.bounce) return ENOMEM;
++	sd_pin_clock_init();
++	int error = sd_power_init();
++	if (!error) error = sd_init_card();
++	if (!error) error = sd_find_partition(part);
++	if (error) {
++		printf("SWEET SD: init/root lookup failed: %d (cfg %08x int %08x fifo %08x)\n",
++		    error, sd_rd(R_CFG), sd_rd(R_INT), sd_rd(R_FIFOCS));
++		return error;
++	}
++	sd.bmajor = bdevsw_add(-1, &sweet_sd_bdevsw);
++	if (sd.bmajor < 0) return ENXIO;
++	sd.cmajor = cdevsw_add_with_bdev(-1, &sweet_sd_cdevsw, sd.bmajor);
++	if (sd.cmajor < 0) return ENXIO;
++	sd.bdev = makedev(sd.bmajor, 0);
++	devfs_make_node(sd.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdroot0");
++	devfs_make_node(makedev(sd.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdroot0");
++	sd.ready = true;
++	printf("SWEET SD: '%s' start %llu sectors count %llu, read-only at 6.5MHz\n",
++	    part, sd.first, sd.count);
++	return 0;
++}
++
++int sweet_sd_rootdev(dev_t *dev);
++int
++sweet_sd_rootdev(dev_t *dev)
++{
++	if (!sd.ready) {
++		int e = sweet_sd_init();
++		if (e) return e;
++	}
++	*dev = sd.bdev;
++	return 0;
++}
++#endif
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,2 +107,3 @@
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/sweet_sd.c			standard
+ bsd/dev/mem.c			standard
+
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -766,14 +766,26 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+ 		extern int sweet_ufs_rootdev(dev_t *dev);
+ 		OSSafeReleaseNULL(matching);
+ 		int ufs_error = sweet_ufs_rootdev(root);
+ 		if (ufs_error) {
+ 			panic("IOFindBSDRoot: SWEET UFS root %s unavailable: %d", rdBootVar, ufs_error);
+ 		}
+ 		strlcpy(rootName, rdBootVar, rootNameSize);
+ 		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+ 		*oflags = 0;
+ 		goto iofrootx;
+ 	}
++	if (strcmp(rdBootVar, "sdroot0") == 0) {
++		extern int sweet_sd_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int sd_error = sweet_sd_rootdev(root);
++		if (sd_error) {
++			panic("IOFindBSDRoot: SWEET SD root %s unavailable: %d", rdBootVar, sd_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
+ #endif
+
+diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -199,2 +199,8 @@ static const struct {
+ 	{ 0x1c60, 0x0002, 0x01 },       /* LDO_VCN18_OP_CFG: HW0_OP_CFG */
++	/* X670 MSDC1 microSD rails: fixed 3.0 V and enable only. */
++	{ 0x1e4c, 0x0fff, 0x0b00 },     /* LDO_VMC: 3.0 V selector */
++	{ 0x1cc4, 0x0001, 0x0001 },     /* LDO_VMC: enable */
++	{ 0x1e48, 0x0700, 0x0300 },     /* VMCH: 3.0 V selector */
++	{ 0x1cd8, 0x0001, 0x0001 },     /* VMCH: enable */
++	{ 0x1d70, 0x0005, 0x0001 },     /* VMCH EINT low: enable, active low */
+ };

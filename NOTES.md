@@ -1,5 +1,315 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Active device port: Infinix Note 12 G96 (X670, MT6781)
+
+**Handoff 2026-11-07.** This workspace also has an in-progress X670 port on the
+`x670` branch/worktree. Read this section before resuming that port; the older
+notes below describe the separate `sweet` device.
+
+- User reports `fastboot boot` does not work on this device and a flashed
+  `boot.img` bricks it; they can recover with BROM on another laptop. On
+  2026-11-07 the connected phone reported slot `_b`, `flash.locked=1`, and
+  `verifiedbootstate=green`; `adb root` was unavailable. `adb reboot bootloader`
+  succeeded, `fastboot flash boot_b shim/out/viva-boot.img` reported both send
+  and write OKAY, and `fastboot reboot` completed. User now observes the logo
+  coming on, going dark, and repeating. This is consistent with the test shim's
+  panel-bias toggling/reset loop, but the observed number/timing of blackouts is
+  not yet confirmed. User says they reflashed a `boot.img` using BROM because
+  the nonfunctional image could not get into fastboot; which image they restored
+  is unclear. ADB and fastboot were both absent from USB at the last check. No
+  stock boot partition backup was pulled this session.
+- Device firmware is in
+  `../Infinix-Note-12-X670-H814DGHJKL-T-GL-240224V556-And-13-Flash-File-RMM-11/`.
+  Its boot header is Android v2, page size 2048, kernel load address
+  `0x40080000`, ramdisk `0x47c80000`, DTB `0x4bc80000`; the LK image handles
+  Android boot images. `../work/` contains local LK dumps and experiments. Do
+  not commit firmware, dumps, or host/device identifiers.
+- The checked-in LK string extraction contains `cmd_boot`, Android boot image
+  parsing, and fastboot `download`/`boot` command strings. This shows a
+  fastboot-boot code path exists in this LK build; it does not prove that the
+  handset accepts the command or the repacked image. The scatter file labels
+  storage as eMMC, while the live FDT and bootargs describe UFS; prefer runtime
+  evidence over that scatter label until the storage topology is verified.
+- `../x670-fdt.bin` is the valid live FDT (`../bootdump/dtb` is a MediaTek DT
+  table wrapper, not a raw FDT). It reports RAM `0x40000000-0x240000000`,
+  framebuffer reservation `0x76c10000` for `0x1df0000` bytes, UFS at
+  `0x11270000`, generic timer at 19.2 MHz, and an ILI7835A command-mode panel.
+  The candidate upper RAM range in `tools/mkadt.py` is
+  `0x140000000-0x23e000000`, excluding the DRAM rank marker pages and leaving a
+  32 MiB boundary margin; confirm XNU mappings before relying on it.
+- Existing uncommitted X670 changes are in `shim/build-viva.sh`,
+  `shim/console.h`, `shim/viva.c`, `tools/mkadt.py`, and
+  `tools/viva-mkboot.sh`. `shim/out/x670-test.adt` and the 17,714,032-byte
+  `../work/xnu-41926630610/kernel.development.sweet` are local artifacts. The
+  build script is `../work/build-x670-nostorage.sh`. No successful phone boot is
+  documented. The user’s boot failures are observations; their cause is
+  unknown.
+- 2026-11-07: built a **shim-only GPIO signal image** at
+  `shim/out/viva-boot.img` using the stock X670 boot header/ramdisk/DTB and
+  `SIGNAL_TEST=1`. Image is 16,025,600 bytes (gzip kernel 4,666 bytes),
+  SHA256 `D37DEB3506E7282CBF6A4F6DAC4803AB8BB005E86B8972583A9721B275E23EFC`.
+  Its shim toggles panel bias GPIO 170 three times, then resets. It was flashed
+  to active `boot_b` and rebooted; see user's observation above.
+- After the signal observation, built the XNU **nostorage** image with
+  `../work/build-x670-nostorage.sh`: `shim/out/viva-boot.img`, 17,258,496 bytes,
+  SHA256 `C9D3C2444B9C10CCBA8946963BB0DE557A9B6066009783714C7CC82F6B12A49C`.
+  Uses XNU kernel artifact `../work/xnu-41926630610/kernel.development.sweet`,
+  X670 ADT, `vivausb=3`, `vivagpu=0`, and no storage node/root write. Build
+  warned that `research/ipsw-x/d22ap.adt` is absent, so the `/product` node was
+  omitted. The boot image structure was inspected; it has not been flashed.
+- `mkadt.py --x670` currently emits shared MT6781 GIC/timer values and X670
+  RAM/framebuffer values, and omits all `viva_devices()` children. The `--ufs`
+  stage adds the shared MT6781 UFS node. This is only an early boot profile;
+  X670 display, touch, keys, and storage behavior are unverified.
+- 2026-11-07 screen-log attempt: XNU build succeeded in GitHub Actions run
+  42321509632 and the kernel artifact checksum matched. The image was flashed
+  to boot_b and fastboot rebooted. The host listener never saw USB VID:PID
+  1209:0002; user reports a frozen boot logo and Windows' unrecognized USB
+  device. Review of the CI log found patch 0090 was skipped as malformed at
+  line 108, so the kernel retained the base 0x9c000000 framebuffer instead of
+  X670's 0x76c10000. The shim did use 0x76c10000, but had no DSI refresh trigger.
+  Neither screen output nor the X670 USB link was verified. Do not retry that
+  image.
+- Diagnosis: X670's panel is command-mode ILI7835A. The previous image only
+  wrote the framebuffer and never triggered DSI/OVL transfer, so the DDIC could
+  keep showing LK's logo. The CI kernel also used the wrong framebuffer because
+  patch 0090 was malformed and skipped. A local fix now corrects patch 0090 and
+  adds a guarded DSI start trigger for shim and early XNU lines; it has not been
+  tested on-device. USB remains separate: vivausb=3 starts in
+  sweet_ufs_rootdev(); Windows' device error did not produce VID:PID 1209:0002,
+  and we cannot tell how far XNU got.
+- Fixed patch 0090 and added guarded DSI refresh triggers in commit
+  `f09b6f3` (`x670` branch). CI run 42325701674 succeeded; its log explicitly
+  shows `Applying patch: .../0090-viva-early-framebuffer.patch` (no skip).
+  Kernel SHA256 is
+  `4C3F13773AC0E98A97C45DC5400F3BE5EF77889E9644C17DA753D8D375796353`.
+- Packaged local nostorage diagnostic candidate at
+  `../work/x670-fixed-candidate/viva-boot-x670-dsi-console-candidate.img`
+  (17,242,112 bytes, SHA256
+  `1B5C653C1EF29DFE01A849A9737347AD71D35EEF3AC9EA5B9BC47F119D97EF96`).
+  Its command line includes `sweetfb_noconsole=0 vivausb=3`, with one CPU and
+  no UFS node. It preserves the stock boot header and DTB. DSI refresh and USB
+  logging remain unverified on-device.
+- 2026-11-07, after explicit user authorization: verified the candidate hash,
+  confirmed fastboot product `x670_h814`, serial `089112525K002098`, current
+  slot `b`, flashed it to `boot_b` successfully (send/write OKAY), then rebooted.
+  Started `tools/viva-link.py log` on the host. At last observation, it was
+  still waiting for VID:PID `1209:0002`; ADB showed no device and Windows had no
+  phone USB device present. User reported the screen remained on the boot logo,
+  then restored the phone using the backup boot image; Android is running again.
+- Follow-up diagnosis: the DSI refresh code gated the start pulse on DSI enable
+  and mode register values that had never been measured on this LK handoff. If
+  either differed from assumptions, both shim and kernel silently skipped the
+  refresh. Linux MTK register definitions confirm the offsets and pulse are
+  correct, but not the live register values. Commit `687670a` removes that
+  unverified gate in the shim and XNU early console. Local shim build and CI
+  run 42337115663 succeeded; the CI log confirms patch 0090 applied. Kernel
+  SHA256 is `C5E9823976E2069827AE2074D12A651E616D577C1B709CF4CAB68E0154F82E16`.
+  Packaged a fresh nostorage image at
+  `../work/x670-dsi-pulse-candidate/viva-boot-x670-dsi-pulse-candidate.img`
+  (17,242,112 bytes, SHA256
+  `3E46B444DDCB2B33435B0DF8EDB02BC9A7C7ADC76DB0237861D70B54A2E1741F`).
+  User explicitly authorized this candidate on 2026-11-07. Verified serial
+  `089112525K002098`, product `x670_h814`, active slot `_b`, flashed it to
+  `boot_b` successfully (send/write OKAY), then rebooted. Started the host
+  `tools/viva-link.py log` listener; it is still waiting for VID:PID `1209:0002`.
+  ADB and fastboot currently show no device after reboot. The display result is
+  not yet reported; do not infer whether the DSI pulse worked until user
+  reports the screen or the listener receives output.
+- 2026-11-07 follow-up: user reports the latest `x670-dsi-pulse-candidate`
+  still leaves the boot logo static and Windows shows `Unknown USB Device
+  (Device Descriptor Request Failed)` (Code 43, `VID_0000&PID_0002`). The
+  `viva-link.py` listener remains unable to enumerate `1209:0002`. This means
+  the host detects a USB attach but has not read the device descriptor; it
+  does not prove that XNU reached `viva_usb_probe()` or that EP0 code ran.
+  The unguarded DSI START pulse did not make the console visible. Do not flash
+  again without explicit user authorization.
+- Investigation after that result: X670's panel compatible is
+  `ili7835a,fhdp,dsi,cmd,edo,edo,x670`. The local LK strings show a command-mode
+  RDMA wait. A public MT6781 kernel reference
+  (`xiaomi-mt6781-devs/kernel_xiaomi_viva`, `mt6765` display driver) shows that
+  its DSI trigger sets MMSYS_MISC to `0x14`, queues DCS WRITE_MEMORY_START
+  (`0x002c3909`) at DSI+0x200, sets DSI_CMDQ_SIZE to 1, then pulses DSI_START.
+  The prior X670 console omitted the first three steps. They are now added to
+  both the shim refresh and XNU early console; the early console waits up to
+  100 ms for DSI BUSY to clear before reusing the command queue. This is
+  source-derived and still needs a hardware result.
+- USB Code 43 is compatible with a failure before the device descriptor is
+  returned; it does not identify whether high-speed negotiation or EP0 is at
+  fault. Patch 0093 now adds `vivausb=4`, which uses the same gadget at forced
+  full speed (64-byte endpoint descriptors), to separate high-speed setup
+  issues from EP0/gadget issues on the next authorized kernel test.
+- Built a shim-only screen diagnostic (stock boot header/ramdisk/DTB, no XNU
+  payload) at `../work/x670-dsi-diagnostic/viva-boot-shim-screen-test.img`,
+  16,025,600 bytes, SHA256
+  `012DFD038A78D10A34D4C30285AB55CEC62DB0C4CE8945396D2D805E57899A49`. It
+  contains the new DCS frame trigger and stops at the shim's no-payload screen.
+  This image has not been flashed. The USB full-speed mode is source-patched but
+  still needs an XNU build. Do not flash or reboot without fresh authorization.
+- Follow-up build 2026-11-07: GitHub Actions run 42340568446 completed
+  successfully and its log explicitly shows both `0090-viva-early-framebuffer`
+  and `0093-viva-usb-link` being applied (no skips). Kernel artifact
+  `../work/x670-dsi-diagnostic/xnu/kernel.development.sweet` is 17,430,568
+  bytes, SHA256
+  `A12B21F912F9EE0804686E925CC3FEA29CE22FA0A785714C8041BC4E54A7C319`.
+  Packaged the full nostorage X670 candidate
+  `../work/x670-dsi-diagnostic/viva-boot-dsi-usb-fs-test.img` (16,975,872
+  bytes, SHA256
+  `3709675A8A57FF96C6ECA160607EA195BE8EB48F91E6E803BC88D8011B134D56`).
+  It uses `vivausb=4` (forced full speed), the command-mode DSI frame trigger,
+  and console output. The phone was not flashed or rebooted for this build;
+  await explicit user authorization before flashing it.
+- On the user's renewed flash instruction (2026-11-07), the host detected the
+  phone in Android/ADB. Re-verified the candidate checksum, ran `adb reboot
+  bootloader`, confirmed fastboot product `x670_h814` and slot `b`, flashed the
+  candidate to `boot_b` (send/write OKAY), and ran `fastboot reboot` (OKAY).
+  After reboot, neither ADB nor fastboot enumerated; Windows showed no phone USB
+  device. Started `tools/viva-link.py ... log`; it remains waiting for VID:PID
+  `1209:0002`, and the log file is empty. The screen result has not been
+  reported yet.
+- Prepared a separate screen-only diagnostic while the user recovers the phone:
+  `../work/x670-display-tests/viva-boot-display-method-tests.img` (16,025,600
+  bytes, SHA256
+  `0E50B1A9434A547F17D5718F8AE244AADDB4C7CD1D75266187CFEF6E7F2911FB`). It
+  keeps the stock Android boot header, ramdisk and DTB and contains no XNU
+  payload. It runs five 12-second, differently colored, on-screen labeled
+  stages: framebuffer writes without refresh (control), bare DSI_START edge,
+  DCS WRITE_MEMORY_START plus start without MMSYS override, the MTK-derived
+  MMSYS_MISC + DCS + start sequence, then that full sequence repeated three
+  times. The final stage remains displayed indefinitely. Build succeeded with
+  only unused GPIO/reset helper warnings; boot image structure and checksum
+  were verified.
+- User authorized flashing the display-method diagnostic on 2026-11-07. Phone
+  appeared in ADB as X670, then `adb reboot bootloader` completed; fastboot
+  confirmed product `x670_h814` and current slot `b`. Re-verified the image
+  SHA256, flashed it to `boot_b` (send/write OKAY), and rebooted (OKAY). Await
+  user observation of the display stages; do not infer a screen result.
+- User reports that after waiting one minute, the display-method diagnostic
+  still shows only LK's logo. This indicates none of the five tested refresh
+  methods produced visible output, assuming the shim entered the test loop.
+  The test omitted the MTK display mutex enable that `dpmgr_path_trigger()`
+  performs before `ddp_dsi_trigger()`. Public MT6781 sources show the manager
+  enables the mutex before the DSI driver queues 0x002c3909 and starts DSI.
+  Live X670 FDT names `disp_mutex@14001000`, confirming the mutex register base.
+- Built follow-up shim diagnostic
+  `../work/x670-display-tests/viva-boot-display-method-tests-mutex.img`
+  (16,025,600 bytes, SHA256
+  `8BEFE887581F984F0BA31E79FC6E8D9828DF8F534C37B63D4ADEDDB3EDC05480`). It
+  adds labeled TEST 6: write 1 to mutex0 enable at 0x14001020, then the full
+  MMSYS_MISC + DCS + DSI start sequence. It has not been flashed. Preserve the
+  recovery path before any next test and await explicit flash authorization.
+- User reported Android recovery and authorized flashing the mutex diagnostic
+  (2026-11-07). Verified its SHA256, saw the phone in ADB, rebooted to
+  fastboot, confirmed product `x670_h814` and slot `b`, flashed it to `boot_b`
+  (send/write OKAY), and rebooted (OKAY). Await the display result; TEST 6
+  begins roughly 60 seconds after shim startup and then remains on screen.
+- User confirms TEST 6 displayed output, proving the shim's framebuffer writes
+  become visible after enabling mutex0 at `0x14001020`. Added that mutex enable
+  before the DSI command to `shim/console.c` and to patch 0090's XNU early
+  console. The early XNU alias already maps the full `0x14000000` display block,
+  so the mutex at `0x14001000` is covered. Local X670 shim build succeeds. XNU
+  CI build is the next check; no XNU image has been flashed with this change.
+- Hosted repository is now `cosmetide/ios-scorpion`, with the local `x670-fork`
+  remote pointing to it. User supplied the full iOS 16.5 (20F66) IPSW at
+  `../ios-firmware/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw` (6,165,698,198
+  bytes). Its BuildManifest identifies ProductVersion 16.5 / build 20F66 and
+  includes D22AP plus kernelcache.release.iphone10b. No iOS root filesystem has
+  been built from it; focus remains getting XNU to boot.
+- First CI attempt after adding mutex support (run 42344679844, commit f89a81b)
+  succeeded as a workflow but skipped patch 0090 as corrupt due to stale unified
+  diff hunk counts. Corrected the counts and committed `8dc75e1`; that run
+  42345386034 now explicitly logs `Applying patch: ...0090-viva-early-framebuffer.patch`
+  and succeeded. Kernel SHA256 is
+  `E178EFE984F0ADFAAD1C9488D5DDF83E6E810F67541467FCD66CFB9904989E7D`.
+- Packaged XNU candidate
+  `../work/x670-mutex-xnu/viva-boot-xnu-mutex-nostorage-no-usb.img` (16,975,872
+  bytes, SHA256
+  `A7338D74E890371E966875BC44607E5497A5F820F0D8BCB7E3B6985CA68BCDD1`). It
+  uses the corrected XNU early framebuffer with mutex0 enable, one CPU,
+  `vivagpu=0`, `vivascanout=0`, `sweetfb_noconsole=0`, `sweetusb=0`, and no
+  UFS/root node (nostorage). The stock Infinix Android boot header, ramdisk,
+  and DTB are retained. Expected use is to observe whether XNU's early console
+  starts drawing; it will later hit the deliberate missing-root panic. The
+  image was flashed to `boot_b` after the user's explicit instruction on
+  2026-11-07. Verified image SHA256, found device in ADB, rebooted to fastboot,
+  confirmed product `x670_h814` and slot `b`, flashed `boot_b` (send/write
+  OKAY), and rebooted (OKAY). Await the user's report of what appears on screen;
+  the image has no USB diagnostics and intentionally stops at missing root.
+- User reports this XNU image displays `SWEET EARLY 20 kprintf startup complete`
+  and `Darwin Kernel Version 22`. This confirms the X670 XNU kernel reached its
+  startup console. The current image is nostorage, so it is expected to panic
+  when it tries to resolve root; no iOS root was attempted yet.
+- 2026-11-07 iOS 16.5 userdata prep: extracted the D22AP OS/SystemOS/AppOS DMGs
+  from the local 20F66 IPSW to `../work/ios16.5-20F66-x670/`. Built an
+  X670 `ufs-rw` boot image at
+  `../work/ios16.5-20F66-x670/ios-scorpion-ufs-rw.img` (SHA256
+  `0D97F32CE5FD36B7540057169954368DAC6093A10F1D49154B44DD346EDF25CC`), with
+  `rd=ufsroot0 ufslun=2 ufsrw=1 rootrw=1`, the MediaTek UFS node at
+  `0x11270000`, and the latest XNU kernel. Verified the boot header, payload
+  arguments and ADT node. No flash performed. Added
+  `tools/viva-build-iosroot.sh` to run the established Viva sequence on Linux:
+  create journaled HFS+, apply root tweaks, then convert to Android sparse
+  format. `sweet-root-tweaks.py` now reads the actual IPSW version/build instead
+  of hard-coding 16.7.16. The HFS+ userdata root image is NOT built because
+  this Windows host lacks APFS mounting and HFS+ creation tools. Also verify
+  kernel/userland compatibility: the booted kernel reports Darwin 22.6, and
+  this root comes from iOS 16.5.
+- User now prefers a RAM root. Current X670 ADT exposes only
+  `0x140000000-0x23e000000` (~3.97 GiB, less the panic-log carveout) to XNU,
+  despite 8 GiB physical RAM. The Android boot loader places the initrd at
+  `0x47c80000` and the DTB at `0x4bc80000`; `viva-mkboot.sh` rejects payloads
+  over that 64 MiB window. `mkpayload.py --ramdisk` appends a raw image (not a
+  sparse image), so the 16 GiB HFS+ root cannot fit in this RAM-disk path.
+  HackiOS uses a separate loader that transfers its image into RAM; X670's
+  current shim does not. Do not attempt a full iOS RAM root without a new
+  image transport/loader design and a memory budget that fits the actual root.
+- 2026-11-07 RAM-disk packer safety: `tools/mkpayload.py --ramdisk` now checks
+  the image plus kernel, ADT, and boot args against the XNU RAM range before
+  reading the image into host memory. It also requires at least 1 GiB remain
+  for XNU/iOS runtime allocations. With the current X670 map this leaves about
+  2.9 GiB for the raw root image, so the full iOS root still cannot boot from
+  RAM. The next real options are a substantially smaller demand-loaded root or
+  UFS-backed root; Fastboot alone cannot change this memory limit.
+- 2026-11-07 loader research for a RAM root: HakiOS's current docs describe two
+  firmware choices. Its Mu-Silicium UEFI build needs the phone vendor's UEFI
+  drivers and the documented path is Qualcomm XBL; that is not a drop-in for
+  this MT6781/LK device. The newer HakiOS U-Boot path avoids those vendor
+  binaries, but its published phone port is Snapdragon 778G/Qualcomm DWC3 and
+  the fastboot handoff is specific to that platform. HakiOS streams its ~2.5
+  GB system image to the loader over USB (`xl ramdisk`); its 64 MiB reserved
+  payload area holds the kernel/loader and panic log, not the system image.
+  Locally cloned HakiOS UEFI source is in `../work/bootloader-research/hakios-uefi/`
+  for inspection only. No Mu-Silicium/U-Boot firmware was built or flashed.
+- Cloned HakiOS's main kernel repository at
+  `../work/bootloader-research/hackios-xnu-kernel/` to inspect its U-Boot
+  instructions. The phone-specific U-Boot sources are brought in by their
+  separate device sync and are not present in this checkout. The local general
+  U-Boot tree has MediaTek families (including MT818x/MT819x), but no MT6781
+  target; an X670 U-Boot board/SoC port is still real bootloader work, not a
+  configuration-only reuse. The existing shim is a faster way to keep testing
+  XNU while that option is evaluated.
+- The useful X670 milestone already achieved is direct XNU startup through the
+  LK Android-boot shim, including visible early kprintf output. For RAM boot,
+  the next engineering milestone is a host-to-device image transport that can
+  load an iOS root image after the loader starts, plus enough contiguous RAM
+  reserved and described to XNU. Porting a complete UEFI stack is not required
+  for that; if pursuing HakiOS U-Boot, it needs an MT6781 board/handoff and USB
+  device-mode port first. The latest observed XNU USB attempt had Windows Code
+  43, so USB streaming is an unresolved prerequisite. The current 64 MiB
+  Android ramdisk placement cannot carry the root image. No flash authorized
+  by the latest request; do not flash without a new explicit instruction.
+- 2026-11-07: started a minimal mainline U-Boot X670 target in the local
+  `../work/tools/u-boot` v2026.07 tree (base commit `ece349ad`), with a
+  reproducible patch at `bootloader/x670/0001-x670-lk-display-port.patch`.
+  It takes LK's saved FDT, describes the full 8 GiB DRAM map, and draws a
+  labeled `X670 U-BOOT TEST 1` frame using the verified mutex/DSI refresh
+  sequence. `tools/x670-mkuboot.sh` packages it into the stock Android boot
+  image format without flashing. Build was attempted but stopped before
+  compilation: `aarch64-linux-gnu-gcc` is not installed (WSL is also absent).
+  Therefore no U-Boot image artifact exists yet and the code has not been
+  compiled or device-validated. Next: obtain an AArch64 GNU toolchain/build
+  environment, build and inspect the image, then ask before any flash test.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
@@ -431,3 +741,45 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## Active handoff — X670 microSD root (2026-11-07)
+
+- User wants to continue XNU/iOS boot from a separate microSD card and explicitly
+  does not want Android `userdata` erased. Do not write or format internal UFS;
+  no phone flashing is authorized by this request.
+- X670 stock DTB identifies removable host `/mmc@11240000`: compatible
+  `mediatek,mt6781-mmc`, MSDC1, 4-bit, max 200 MHz, registers `0x11240000`
+  and `0x11c90000`, clocks from provider `0x24` IDs `15,30,41`, pinctrl state
+  phandle `0x6d`, card detect GPIO provider `0x35` line 9, and rails phandles
+  `0x70`/`0x71`. Linux DT includes `no-mmc` and `no-sdio`; the host is for SD.
+- Current `tools/mkadt.py --x670` work adds an Apple `/sweet-sd` hardware
+  description and a PWRAP nub so a future driver can access PMIC rails. The
+  ADT generation edit is not a working SD driver yet. Corrected a Python
+  construction-order issue by defining the PWRAP node before `/arm-io` uses it.
+- XNU currently supports `rd=ufsroot0` and `rd=md0`, but no MT6781 SD root
+  driver. Remaining work: identify/configure pinmux, clocks and the two SD
+  regulator rails; implement MSDC command/PIO reads and GPT root partition
+  exposure; then build/test before preparing a removable-card image. Do not
+  claim SD boot is ready until that path is built and exercised.
+- The separate `scorpion-uboot` build currently has MMC disabled in
+  `x670_defconfig`; the current board DTS is minimal and omits the MT6781 SD
+  host/clock setup. A working chain needs both U-Boot card file loading and the
+  XNU root driver. This PC sees a Realtek USB card reader but no removable disk
+  is inserted, and no phone USB device is currently present.
+- Linux reference sources were inspected from
+  `mt6781-devs/android_kernel_xiaomi_mt6781` (Lineage 23.2): MT6781 pinctrl,
+  clock, MSDC and MT6358 regulator definitions. The host pins are 85-90; pin
+  mode registers are in GPIO MMIO, while pull/drive settings use IOCFG banks.
+  The exact clock IDs are topckgen 15 and infracfg_ao 30/41. These are research
+  references only; no GPL Linux driver code has been copied into XNU.
+
+## SD boot implementation update (2026-11-07)
+- Added `xnu/patches/0155-sweet-sd-root-device.patch`: polled, read-only MT6781 MSDC1 host, SD initialization, GPT lookup by partition name (default `iosroot`, override `sdroot=`), and `rd=sdroot0` root-device dispatch. SD writes are refused. This is source work only; no XNU build or hardware card probe has completed yet.
+- Corrected the MT6781 pin configuration from the Linux pin field definitions: MSDC1 IOCFG is bank BL at `0x10002600`; pins 85-90 have per-pin IES registers `0x10..0x60` and SMT `0x80..0xd0`. Previous draft used LB and grouped offsets, which was wrong.
+- `tools/mkadt.py` now publishes the corrected IOCFG-BL address in `/sweet-sd`.
+- `scorpion-uboot/bootloader/x670/0015-x670-msdc1-sd-boot.patch` adds MT6781 MMC matching, SD rails/pinmux/clock setup, FAT loading, and an automatic attempt to boot `scorpion-boot.img` from partition 1 before the previous USB fastboot fallback. The boot image should be the existing `viva-mkboot.sh` output with the XNU shim and payload, not a direct U-Boot XNUP payload.
+- U-Boot patch 0015 applies cleanly to the working checkout after 0001-0014. Neither GitHub build has been run for these changes yet. The XNU driver and board SD initialization have not been tested on the handset.
+- No microSD card is inserted, so no physical card was formatted or written. Android internal UFS/userdata remains untouched. A complete release needs a built XNU artifact, a rebuilt shim boot image, a 16 GiB HFS+ root image sourced from the local iOS 16.5 DMGs, and then a FAT+HFS+ SD layout. Current U-Boot code assumes the first detected MMC device is the microSD device.
+- Added a dedicated `sd-ro` boot-image stage to `tools/viva-mkboot.sh`. It writes `rd=sdroot0 sdroot=iosroot`, selects the X670 ADT, and keeps framebuffer logs enabled; UFS stages preserve their previous arguments.
+- Added `docs/SD_BOOT.md` and `tools/prepare-sdcard.sh`. The script requires a removable device, shows its identity, and asks the operator to type its full path before creating FAT32 + HFS+ GPT partitions. It was not run because there is no SD card inserted.
+- U-Boot's controller driver now has a fallback for the live ABL FDT case: if clock providers cannot be resolved, it uses the board's explicitly prepared 26 MHz clock. The boot command passes U-Boot's retained FDT to `bootm` along with the Android boot image.

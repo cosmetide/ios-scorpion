@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--viva [--ufs]]
+address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--viva [--ufs]] [--x670]
 """
 import hashlib, os, struct, sys
 
@@ -15,7 +15,7 @@ MEM_SIZE = 0x4d000000
 # Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
 # /pram + /chosen/embedded-panic-log-size. Without it, pe_init.c's
 # check_for_panic_log() leaves gPanicBase == 0, debug_log_init() bails out twice
-# and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
+# and the kernel hangs right after "kdp_core zlib memory" â€” reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
 # --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
@@ -54,6 +54,19 @@ VIVA_VTIMER_INTID = 27  # DT timer <GIC_PPI 11>, the standard virtual timer
 VIVA_ECID = 0x5649564100000001  # 'VIVA' + 1, synthetic
 # MediaTek ufshci@11270000 (DT size 0x2300, one 16K page)
 VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
+
+# --x670: Infinix Note 12 G96 (X670), same MT6781 SoC as viva (same GIC, timer,
+# UFS and peripheral addresses) but 8 GiB of RAM and a command-mode panel.
+# /memory = 0x40000000-0x240000000; every reservation is below 0xc0000000
+# except the two 4 KiB dramc-rk pages at 0x13ffff000 (just below the base) and
+# 0x23ffff000 (just below the top). So the upper rank 0x140000000-0x23e000000
+# is contiguous and free: ~3.97 GiB, stopping 32 MiB below dramc-rk1 so the
+# kernel's 32 MiB cacheable blocks never touch it.
+# FB: /chosen/atag,videolfb fb_base 0x76c10000 (live DTB), pitch 1088 px.
+X670_PHYS_BASE, X670_MEM_SIZE = 0x140000000, 0x23e000000 - 0x140000000
+X670_FB, X670_FB_STRIDE = 0x76c10000, 1088 * 4
+X670_FB_SIZE = (X670_FB_STRIDE * 2400 + 0x3fff) & ~0x3fff
+X670_ECID = 0x5836373000000001  # 'X670' + 1, synthetic
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
@@ -247,13 +260,18 @@ def viva_devices(ph, phandle, gic_ph, ecid):
     ]
 
 
-def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
+def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     viva=True: Redmi Note 11 Pro 4G addresses. Without viva_ufs there is no UFS node, so the
-    kernel never touches storage; with it the kernel drives the MediaTek host LK left running."""
+    kernel never touches storage; with it the kernel drives the MediaTek host LK left running.
+    x670=True: Infinix Note 12 G96 (implies viva; own RAM/FB, no viva device nubs yet)."""
+    if x670:
+        viva = True
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     if viva:
         phys_base, mem_size = VIVA_PHYS_BASE, VIVA_MEM_SIZE
+    if x670:
+        phys_base, mem_size = X670_PHYS_BASE, X670_MEM_SIZE
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -264,6 +282,8 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
         gicd, gicr, timebase = VIVA_GICD, VIVA_GICR, VIVA_TIMEBASE
         gicd_size, gicr_size, vtimer = VIVA_GICD_SIZE, VIVA_GICR_SIZE, VIVA_VTIMER_INTID
         fb, fb_size, fb_stride, ecid = VIVA_FB, VIVA_FB_SIZE, VIVA_FB_STRIDE, VIVA_ECID
+    if x670:
+        fb, fb_size, fb_stride, ecid = X670_FB, X670_FB_SIZE, X670_FB_STRIDE, X670_ECID
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -359,6 +379,14 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
         ('virtual-timer-intid', u32(vtimer)),
         ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
     ])
+    # X670 needs the existing PMIC wrapper service for removable-card rails.
+    # Its reg is relative to /arm-io's SOC_BASE range, like the GIC nodes.
+    pwrap = node('pwrap', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-pwrap')),
+        ('reg', u64(0x1000d000 - SOC_BASE, 0x1000)),
+    ])
+
     arm_io = node('arm-io', [
         ph(),
         ('device_type', cstr('sweet-io')),
@@ -381,7 +409,8 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
             ('compatible', cstr('sweet,display')),
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
-        ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva else []))
+        ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva and not x670 else []) +
+        ([pwrap] if x670 else []))
 
     fbcon = node('sweet-fbcon', [
         ph(),
@@ -396,6 +425,29 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
         ph(),
         ('compatible', cstr('mediatek,mt8183-ufshci') if viva else cstr('qcom,ufshc')),
         ('reg', u64(VIVA_UFS, VIVA_UFS_SIZE) if viva else u64(UFS, UFS_SIZE)),
+    ])
+
+    # X670's removable microSD slot is MSDC1, distinct from the UFS boot
+    # storage. Keep the Linux DT's exact compatible and hardware references;
+    # the XNU host driver must bring up pins, clocks and rails before probing.
+    sdcard = node('sweet-sd', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-mmc')),
+        ('reg', u64(0x11240000, 0x10000, 0x11c90000, 0x10000)),
+        ('host-index', u32(1)),
+        ('bus-width', u32(4)),
+        ('max-frequency', u32(200000000)),
+        ('clock-control-regs', u64(0x10000000, 0x1000, 0x10001000, 0x1000)),
+        ('gpio-reg', u64(0x10005000, 0x1000)),
+        ('iocfg-bl-reg', u64(0x10002600, 0x1000)),
+        ('pinctrl-phandle', u32(0x6d)),
+        ('clock-source', u64(0x24, 0x0f)),
+        ('clock-gates', u64(0x26, 0x1e, 0x26, 0x29)),
+        ('gpio-provider-phandle', u32(0x35)),
+        ('card-detect-gpio', u32(9)),
+        ('card-detect-gpio-flags', u32(0)),
+        ('vmmc-phandle', u32(0x70)),
+        ('vqmmc-phandle', u32(0x71)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -436,12 +488,13 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([ufs] if (viva_ufs if viva else not qemu) else []))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product +
+       ([ufs] if (viva_ufs if viva else not qemu) else []) + ([sdcard] if x670 else []))
 
 
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, viva='--viva' in sys.argv,
-                 viva_ufs='--ufs' in sys.argv)
+                 viva_ufs='--ufs' in sys.argv, x670='--x670' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

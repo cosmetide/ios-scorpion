@@ -6,6 +6,7 @@
 #   nostorage  no UFS node: the kernel never touches storage, panics at root mount
 #   ufs-ro     UFS node, writes refused (no ufsrw): finds "userdata" and tries to mount it
 #   ufs-rw     iOS root in userdata, read-write; writes stay inside that partition
+#   sd-ro      X670 microSD root, read-only; finds GPT partition "iosroot"
 # Env: VIVA_CMDLINE replaces the whole command line; VIVA_EXTRA sets single
 # boot-args on top of it (default "cpus=8 vivausb=3 vivagpu=2 vivascanout=1": all
 # eight cores incl. the two A76s, USB link, GPU on, direct scanout of CA's
@@ -17,21 +18,35 @@
 # log): their fixed MMIO addresses are other blocks on MT6781.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-KERNEL=${1:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw]}
-STOCK=${2:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw]}
+KERNEL=${1:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw|sd-ro]}
+STOCK=${2:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw|sd-ro]}
 STAGE=${3:-ufs-ro}
+# build-viva.sh runs from shim/: hand it absolute paths (Windows Git Bash / MSYS
+# also needs this, and mkpayload runs from the repo root).
+case $KERNEL in /*) ;; *) KERNEL=$PWD/$KERNEL ;; esac
+case $STOCK in /*) ;; *) STOCK=$PWD/$STOCK ;; esac
 
-BASE='debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 wdt=-1 wdt_test=no_user_checkin sweetkeys=0 sweettouch=0 sweetusb=0 sweetusblog=0 sweetlog=0 ufslun=2 sweetfb_noconsole=1'
+BASE='debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetkeys=0 sweettouch=0 sweetusb=0 sweetusblog=0 sweetlog=0'
 case $STAGE in
-nostorage) ADT_FLAGS=(--viva); CMDLINE=$BASE ;;
-ufs-ro) ADT_FLAGS=(--viva --ufs); CMDLINE=$BASE ;;
+nostorage) ADT_FLAGS=(--viva); CMDLINE="$BASE rd=ufsroot0 ufslun=2 sweetfb_noconsole=1" ;;
+ufs-ro) ADT_FLAGS=(--viva --ufs); CMDLINE="$BASE rd=ufsroot0 ufslun=2 sweetfb_noconsole=1" ;;
 ufs-rw) ADT_FLAGS=(--viva --ufs)
-	CMDLINE="$BASE ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1" ;;
+	CMDLINE="$BASE rd=ufsroot0 ufslun=2 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 sweetfb_noconsole=1" ;;
+sd-ro) ADT_FLAGS=(--viva --x670); CMDLINE="$BASE rd=sdroot0 sdroot=iosroot" ;;
 *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
+# VIVA_DEV=x670: Infinix Note 12 G96 (same MT6781, own RAM/FB, no device nubs yet)
+if [ "${VIVA_DEV:-viva}" = x670 ] && [[ ! " ${ADT_FLAGS[*]} " =~ [[:space:]]--x670[[:space:]] ]]; then
+	ADT_FLAGS+=(--x670)
+fi
 CMDLINE=${VIVA_CMDLINE:-$CMDLINE}
 # VIVA_EXTRA="cpus=6 vivausb=3": set/replace single boot-args (XNU uses the first match)
-for arg in ${VIVA_EXTRA-cpus=8 vivausb=3 vivagpu=2 vivascanout=1}; do
+if [ "$STAGE" = sd-ro ]; then
+	DEFAULT_EXTRA=cpus=8
+else
+	DEFAULT_EXTRA='cpus=8 vivausb=3 vivagpu=2 vivascanout=1'
+fi
+for arg in ${VIVA_EXTRA-$DEFAULT_EXTRA}; do
 	key=${arg%%=*}
 	CMDLINE="$(printf ' %s ' "$CMDLINE" | sed -E "s/ -?$key(=[^ ]*)? / /g; s/^ +//; s/ +$//") $arg"
 done
@@ -41,6 +56,6 @@ mkdir -p shim/out
 python3 tools/mkadt.py shim/out/viva.adt "${ADT_FLAGS[@]}"
 python3 tools/mkpayload.py "$KERNEL" shim/out/viva.adt shim/out/viva-payload.bin --cmdline "$CMDLINE"
 # LK loads the ramdisk at 0x47c80000 and the DTB at 0x4bc80000: 64 MiB of room.
-size=$(stat -f %z shim/out/viva-payload.bin 2>/dev/null || stat -c %s shim/out/viva-payload.bin)
+size=$(wc -c < shim/out/viva-payload.bin)
 [ "$size" -lt $((0x4bc80000 - 0x47c80000)) ] || { echo "error: payload ($size bytes) would overrun LK's DTB" >&2; exit 1; }
 shim/build-viva.sh "$STOCK" "$PWD/shim/out/viva-payload.bin"
