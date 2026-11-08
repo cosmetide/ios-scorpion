@@ -1,6 +1,6 @@
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -1,3 +1,9 @@
+@@ -797,3 +797,9 @@
  #if MONOTONIC && defined(__arm64__)
 +#if defined(SWEET)
 +	kprintf("SWEET SMP: cpu=%u before mt_wake_per_core\n", cpu_data_ptr->cpu_number);
@@ -23,7 +23,7 @@
 +#endif
  	load_context(thread);
  	/*NOTREACHED*/
-@@ -1,4 +1,10 @@
+@@ -867,4 +867,10 @@
  	thread_t                self = current_thread();
  
 +#if defined(SWEET)
@@ -36,7 +36,7 @@
  
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -1,6 +1,15 @@
+@@ -564,6 +564,15 @@
  void
  slave_machine_init(__unused void *param)
  {
