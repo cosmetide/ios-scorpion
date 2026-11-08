@@ -1,0 +1,235 @@
+diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+--- a/bsd/dev/sweet_sd.c
++++ b/bsd/dev/sweet_sd.c
+@@ -2,8 +2,8 @@
+  * SWEET X670 removable microSD root device.
+  *
+  * This is a polled, read-only MT6781 MSDC1 host driver. It uses the board's
+- * fixed pin/clock/PMIC wiring, initializes a standard SD card in 1-bit mode
+- * before switching to 4-bit mode at a conservative clock, reads GPT, and
++ * fixed pin/clock/PMIC wiring, initializes a standard SD card and keeps it
++ * in 1-bit mode at a conservative clock while it reads GPT and the root, and
+  * exposes the named HFS+ partition as /dev/sdroot0. No write command is sent.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -69,6 +69,9 @@
+ 	uint8_t *bounce;
+ 	uint32_t rca;
+ 	uint64_t first, count;
++	uint64_t last_lba;
++	const char *stage;
++	uint32_t last_op, last_arg, last_status, last_got;
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+ 	bool high_capacity, ready;
+@@ -142,15 +145,23 @@
+ sd_command(uint32_t opcode, uint32_t arg, uint32_t rsp, uint32_t *response)
+ {
+ 	uint32_t v, status;
++	sd.last_op = opcode;
++	sd.last_arg = arg;
++	sd.last_status = 0;
++	sd.last_got = 0;
+ 	for (unsigned i = 0; i < 10000; i++) {
+ 		if (!(sd_rd(R_SDC_STS) & SDC_CMDBUSY)) break;
+-		if (i == 9999) return EBUSY;
++		if (i == 9999) { sd.last_status = sd_rd(R_SDC_STS); return EBUSY; }
+ 		delay(1);
+ 	}
+ 	sd_wr(R_INT, sd_rd(R_INT));
+ 	sd_wr(R_SDC_ARG, arg);
+ 	sd_wr(R_SDC_CMD, SD_CMD(opcode, rsp, 0, 0));
+-	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) return ETIMEDOUT;
++	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) {
++		sd.last_status = sd_rd(R_INT);
++		return ETIMEDOUT;
++	}
++	sd.last_status = status;
+ 	if (status & (INT_CMDTMO | INT_RSPCRCERR)) return EIO;
+ 	if (response) {
+ 		v = sd_rd(R_RESP0);
+@@ -166,12 +177,21 @@
+ 	if (!sd.high_capacity && lba > (UINT32_MAX / SD_SECTOR)) return EINVAL;
+ 	arg = sd.high_capacity ? (uint32_t)lba : (uint32_t)(lba * SD_SECTOR);
+ 	if ((uint64_t)arg != (sd.high_capacity ? lba : lba * SD_SECTOR)) return EINVAL;
++	sd.last_op = 17;
++	sd.last_arg = arg;
++	sd.last_lba = lba;
++	sd.last_status = 0;
++	sd.last_got = 0;
+ 	sd_wr(R_FIFOCS, 1u << 31);
+ 	sd_wr(R_BLK_NUM, 1);
+ 	sd_wr(R_SDC_ARG, arg);
+ 	raw = SD_CMD(17, 1, SD_SECTOR, 1);
+ 	sd_wr(R_SDC_CMD, raw);
+-	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) return ETIMEDOUT;
++	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) {
++		sd.last_status = sd_rd(R_INT);
++		return ETIMEDOUT;
++	}
++	sd.last_status = status;
+ 	if (status & (INT_CMDTMO | INT_RSPCRCERR)) return EIO;
+ 	for (uint32_t loops = 0; loops < 5000000; loops++) {
+ 		uint32_t intr = sd_rd(R_INT);
+@@ -185,10 +205,14 @@
+ 			avail -= 4;
+ 		}
+ 		if (intr & (INT_DATTMO | INT_DATCRCERR)) {
++			sd.last_status = intr;
++			sd.last_got = got;
+ 			sd_wr(R_INT, intr);
+ 			return EIO;
+ 		}
+ 		if (intr & INT_XFER_COMPL) {
++			sd.last_status = intr;
++			sd.last_got = got;
+ 			sd_wr(R_INT, intr);
+ 			return got == SD_SECTOR ? 0 : EIO;
+ 		}
+@@ -196,6 +220,20 @@
+ 		delay(1);
+ 	}
+ 	return ETIMEDOUT;
++}
++
++static int
++sd_set_clock_div(uint32_t div)
++{
++	uint32_t cfg = sd_rd(R_CFG);
++	sd_wr(R_CFG, cfg & ~CFG_CKPDN);
++	cfg = sd_rd(R_CFG) & ~(CFG_CKDIV_MASK | CFG_CKMOD_MASK);
++	cfg |= CFG_MODE | CFG_PIO | (div << 8);
++	sd_wr(R_CFG, cfg);
++	for (unsigned i = 0; i < 100000 && !(sd_rd(R_CFG) & CFG_CKSTB); i++) delay(1);
++	if (!(sd_rd(R_CFG) & CFG_CKSTB)) return ETIMEDOUT;
++	sd_wr(R_CFG, sd_rd(R_CFG) | CFG_CKPDN);
++	return 0;
+ }
+ 
+ static int
+@@ -204,6 +242,7 @@
+ 	uint32_t r = 0, ocr = 0;
+ 	int error;
+ 	uint32_t cfg = sd_rd(R_CFG);
++	sd.stage = "controller reset/clock";
+ 	sd_wr(R_CFG, cfg | CFG_RST);
+ 	for (unsigned i = 0; i < 10000 && (sd_rd(R_CFG) & CFG_RST); i++) delay(1);
+ 	sd_wr(R_CFG, (sd_rd(R_CFG) & ~(CFG_CKDIV_MASK | CFG_CKMOD_MASK)) | CFG_MODE | CFG_PIO | (17u << 8));
+@@ -215,31 +254,35 @@
+ 	sd_wr(R_INTEN, 0);
+ 	sd_wr(R_INT, sd_rd(R_INT));
+ 	delay(10000);
++	sd.stage = "CMD0 idle";
+ 	if ((error = sd_command(0, 0, 0, NULL))) return error;
+ 	/* CMD8 is optional on older SD cards. */
++	sd.stage = "CMD8 interface condition";
+ 	if (sd_command(8, 0x1aa, 1, &r) == 0 && (r & 0xfff) == 0x1aa)
+ 		sd.high_capacity = true;
+ 	for (unsigned i = 0; i < 1000; i++) {
++		sd.stage = "ACMD41 prefix CMD55";
+ 		if (sd_command(55, 0, 1, &r)) return EIO;
++		sd.stage = "ACMD41 operating conditions";
+ 		if (sd_command(41, sd.high_capacity ? 0x40ff8000 : 0x00ff8000, 3, &ocr)) return EIO;
+ 		if (ocr & 0x80000000) break;
+ 		delay(1000);
+ 		if (i == 999) return ETIMEDOUT;
+ 	}
+ 	if (sd.high_capacity && !(ocr & 0x40000000)) sd.high_capacity = false;
++	sd.stage = "CMD2 card identity";
+ 	if ((error = sd_command(2, 0, 2, NULL))) return error;
++	sd.stage = "CMD3 relative address";
+ 	if ((error = sd_command(3, 0, 1, &r))) return error;
+ 	sd.rca = r & 0xffff0000;
+ 	if (!sd.rca) return EIO;
++	sd.stage = "CMD7 select card";
+ 	if ((error = sd_command(7, sd.rca, 7, &r))) return error;
++	sd.stage = "CMD16 block length";
+ 	if (!sd.high_capacity && (error = sd_command(16, SD_SECTOR, 1, &r))) return error;
+-	if ((error = sd_command(55, sd.rca, 1, &r))) return error;
+-	if ((error = sd_command(6, 2, 1, &r))) return error; /* ACMD6: 4-bit */
+-	sd_wr(R_SDC_CFG, (sd_rd(R_SDC_CFG) & ~(3u << 16)) | (1u << 16));
+-	/* Keep the host clock deliberately conservative until tuning exists. */
+-	sd_wr(R_CFG, sd_rd(R_CFG) & ~(CFG_CKDIV_MASK | CFG_CKMOD_MASK));
+-	sd_wr(R_CFG, sd_rd(R_CFG) | (1u << 8));
+-	return 0;
++	/* Stay in one-bit mode until MSDC1 data timing is validated on-device. */
++	sd.stage = "set conservative transfer clock";
++	return sd_set_clock_div(1);
+ }
+ 
+ static int
+@@ -248,6 +291,7 @@
+ 	uint8_t *b = sd.bounce;
+ 	uint64_t ent_lba;
+ 	uint32_t nent, esz;
++	sd.stage = "GPT header read (LBA 1)";
+ 	int error = sd_read_sector(1, b);
+ 	if (error) return error;
+ 	if (memcmp(b, "EFI PART", 8)) return ENXIO;
+@@ -259,6 +303,7 @@
+ 	for (uint32_t i = 0; i < nent; i++) {
+ 		uint64_t this_lba = ent_lba + (i / 4);
+ 		if (this_lba != cached) {
++			sd.stage = "GPT entry read";
+ 			if ((error = sd_read_sector(this_lba, b))) return error;
+ 			cached = this_lba;
+ 		}
+@@ -359,6 +404,7 @@
+ 	char part[64] = "iosroot";
+ 	unsigned int sz = 0;
+ 	uintptr_t const *reg = NULL;
++	sd.stage = "device-tree/controller setup";
+ 	if (SecureDTLookupEntry(NULL, "/sweet-sd", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &sz) != kSuccess || sz < 4 * sizeof(uintptr_t)) {
+ 		printf("SWEET SD: no /sweet-sd device-tree node\n"); return ENXIO;
+@@ -377,8 +423,9 @@
+ 	if (!error) error = sd_init_card();
+ 	if (!error) error = sd_find_partition(part);
+ 	if (error) {
+-		printf("SWEET SD: init/root lookup failed: %d (cfg %08x int %08x fifo %08x)\n",
+-		    error, sd_rd(R_CFG), sd_rd(R_INT), sd_rd(R_FIFOCS));
++		printf("SWEET SD FAIL: %s err=%d cmd=%u arg=%08x lba=%llu status=%08x cfg=%08x int=%08x fifo=%08x got=%u\n",
++		    sd.stage ? sd.stage : "unknown", error, sd.last_op, sd.last_arg,
++		    sd.last_lba, sd.last_status, sd_rd(R_CFG), sd_rd(R_INT), sd_rd(R_FIFOCS), sd.last_got);
+ 		return error;
+ 	}
+ 	sd.bmajor = bdevsw_add(-1, &sweet_sd_bdevsw);
+@@ -394,6 +441,18 @@
+ 	return 0;
+ }
+ 
++void
++sweet_sd_error_detail(const char **stage, uint32_t *op, uint32_t *arg,
++	    uint64_t *lba, uint32_t *status, uint32_t *got)
++{
++	if (stage) *stage = sd.stage ? sd.stage : "unknown";
++	if (op) *op = sd.last_op;
++	if (arg) *arg = sd.last_arg;
++	if (lba) *lba = sd.last_lba;
++	if (status) *status = sd.last_status;
++	if (got) *got = sd.last_got;
++}
++
+ int sweet_sd_rootdev(dev_t *dev);
+ int
+ sweet_sd_rootdev(dev_t *dev)
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1,10 +1,15 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	if (strcmp(rdBootVar, "sdroot0") == 0) {
+ 		extern int sweet_sd_rootdev(dev_t *dev);
++		extern void sweet_sd_error_detail(const char **, uint32_t *, uint32_t *, uint64_t *, uint32_t *, uint32_t *);
+ 		OSSafeReleaseNULL(matching);
+ 		int sd_error = sweet_sd_rootdev(root);
+ 		if (sd_error) {
+-			panic("IOFindBSDRoot: SWEET SD root %s unavailable: %d", rdBootVar, sd_error);
++			const char *stage = "unknown";
++			uint32_t op = 0, arg = 0, status = 0, got = 0;
++			uint64_t lba = 0;
++			sweet_sd_error_detail(&stage, &op, &arg, &lba, &status, &got);
++			panic("IOFindBSDRoot: SWEET SD root %s unavailable: %d stage=%s cmd=%u arg=%08x lba=%llu status=%08x got=%u", rdBootVar, sd_error, stage, op, arg, lba, status, got);
+ 		}
+ 		strlcpy(rootName, rdBootVar, rootNameSize);
+ 		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
