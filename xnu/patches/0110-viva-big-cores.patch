@@ -53,10 +53,14 @@
  	}
  	/* Publish exactly once, after every selected CPU has completed initCPU(). */
  	ml_cpu_init_completed();
-@@ -203,6 +209,7 @@
- 	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
- 	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
- 	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
+@@ -203,5 +209,7 @@
+-	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
+-	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
+-	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
++	/* Keep early framebuffer output serialized while secondary CPUs start. */
++	if (getCPUNumber() == 0) {
++		kprintf("SWEET CPU: boot CPU entered initCPU\n");
++	}
 +	midr = (uint32_t)__builtin_arm_rsr64("MIDR_EL1");
  	__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
  }
