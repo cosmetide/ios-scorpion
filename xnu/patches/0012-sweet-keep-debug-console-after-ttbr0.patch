@@ -194,7 +194,7 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  
  	if (debug_boot_arg) {
  		patch_low_glo();
-@@ -535,9 +536,15 @@
+@@ -535,9 +536,14 @@
  	PE_consistent_debug_inherit();
  
  	/* Setup debugging output. */
@@ -204,9 +204,8 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
 +	sweet_early_mark(20, "kprintf startup complete");
-+	if (serial_exists) {
-+		sweet_early_disable();
-+	}
++	/* A serial probe can succeed without a usable X670 UART. Keep the
++	 * framebuffer log alive; serial output is selected separately below. */
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
