@@ -1,0 +1,20 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -766,3 +766,15 @@ arm_init_cpu(
+ #if DEVELOPMENT || DEBUG
++#if defined(SWEET)
++	/*
++	 * The phone has no per-core cpu-debug-interface in its ADT. The trace
++	 * hook is optional debug setup, not part of CPU/interrupt initialization;
++	 * keep it on the boot CPU only while bringing secondaries up. This also
++	 * avoids entering the panic-trace register path on an un-described core.
++	 */
++	if (cpu_data_ptr == &BootCpuData) {
++		PE_arm_debug_enable_trace(should_kprintf);
++	}
++#else
+ 	PE_arm_debug_enable_trace(should_kprintf);
++#endif /* SWEET */
+ #endif /* DEVELOPMENT || DEBUG */
+ 
+ 
