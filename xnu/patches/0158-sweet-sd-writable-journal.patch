@@ -1,0 +1,190 @@
+--- a/bsd/dev/sweet_sd.c
++++ b/bsd/dev/sweet_sd.c
+@@ -1,7 +1,7 @@
+ /*
+  * SWEET X670 removable microSD root device.
+  *
+- * This is a polled, read-only MT6781 MSDC1 host driver. It uses the board's
++ * This is a polled MT6781 MSDC1 host driver. It uses the board's
+  * fixed pin/clock/PMIC wiring, initializes a standard SD card and keeps it
+  * in 1-bit mode at a conservative clock while it reads GPT and the root, and
+  * exposes the named HFS+ partition as /dev/sdroot0. No write command is sent.
+@@ -33,6 +33,7 @@
+ #define R_INT       0x00c
+ #define R_INTEN     0x010
+ #define R_FIFOCS    0x014
++#define R_TXDATA    0x018
+ #define R_RXDATA    0x01c
+ #define R_SDC_CFG   0x030
+ #define R_SDC_CMD   0x034
+@@ -58,7 +59,11 @@
+ #define INT_DATTMO      (1u << 14)
+ #define INT_DATCRCERR   (1u << 15)
+ #define FIFO_RXCNT      0xffu
++#define FIFO_TXCNT      (0xffu << 16)
++#define FIFO_SIZE       128u
+ #define SDC_CMDBUSY     (1u << 1)
++#define SDC_CMD_WR      (1u << 13)
++#define PS_DAT0         (1u << 16)
+ 
+ #define SD_SECTOR       512u
+ #define SD_GPT_MAX_ENT  128u
+@@ -182,6 +187,7 @@
+ 	sd.last_lba = lba;
+ 	sd.last_status = 0;
+ 	sd.last_got = 0;
++	sd_wr(R_INT, sd_rd(R_INT));
+ 	sd_wr(R_FIFOCS, 1u << 31);
+ 	sd_wr(R_BLK_NUM, 1);
+ 	sd_wr(R_SDC_ARG, arg);
+@@ -223,6 +229,79 @@
+ }
+ 
+ static int
++sd_write_sector(uint64_t lba, const uint8_t *in)
++{
++	uint32_t arg, status, sent = 0;
++	if (!sd.high_capacity && lba > (UINT32_MAX / SD_SECTOR)) return EINVAL;
++	arg = sd.high_capacity ? (uint32_t)lba : (uint32_t)(lba * SD_SECTOR);
++	if ((uint64_t)arg != (sd.high_capacity ? lba : lba * SD_SECTOR)) return EINVAL;
++	sd.stage = "CMD24 write sector";
++	sd.last_op = 24;
++	sd.last_arg = arg;
++	sd.last_lba = lba;
++	sd.last_status = 0;
++	sd.last_got = 0;
++	sd_wr(R_INT, sd_rd(R_INT));
++	sd_wr(R_FIFOCS, 1u << 31);
++	sd_wr(R_BLK_NUM, 1);
++	sd_wr(R_SDC_ARG, arg);
++	sd_wr(R_SDC_CMD, SD_CMD(24, 1, SD_SECTOR, 1) | SDC_CMD_WR);
++	if (sd_wait_int(INT_CMDRDY | INT_CMDTMO | INT_RSPCRCERR, &status, 1000000)) {
++		sd.last_status = sd_rd(R_INT);
++		return ETIMEDOUT;
++	}
++	sd.last_status = status;
++	if (status & (INT_CMDTMO | INT_RSPCRCERR)) return EIO;
++
++	for (uint32_t loops = 0; loops < 1000000; loops++) {
++		uint32_t intr = sd_rd(R_INT);
++		if (intr & (INT_DATTMO | INT_DATCRCERR)) {
++			sd.last_status = intr;
++			sd.last_got = sent;
++			sd_wr(R_INT, intr);
++			return (intr & INT_DATTMO) ? ETIMEDOUT : EIO;
++		}
++		uint32_t queued = (sd_rd(R_FIFOCS) & FIFO_TXCNT) >> 16;
++		uint32_t room = queued < FIFO_SIZE ? FIFO_SIZE - queued : 0;
++		while (sent < SD_SECTOR && room >= 4) {
++			uint32_t word = (uint32_t)in[sent] | ((uint32_t)in[sent + 1] << 8) |
++			    ((uint32_t)in[sent + 2] << 16) | ((uint32_t)in[sent + 3] << 24);
++			sd_wr(R_TXDATA, word);
++			sent += 4;
++			room -= 4;
++		}
++		if (intr & INT_XFER_COMPL) {
++			sd.last_status = intr;
++			sd.last_got = sent;
++			sd_wr(R_INT, intr);
++			if (sent != SD_SECTOR) return EIO;
++			break;
++		}
++		if (intr) sd_wr(R_INT, intr);
++		delay(1);
++		if (loops == 999999) {
++			sd.last_status = sd_rd(R_INT);
++			sd.last_got = sent;
++			return ETIMEDOUT;
++		}
++	}
++	/* A completed data phase is followed by the card's internal program busy. */
++	for (unsigned i = 0; i < 1000000; i++) {
++		if (sd_rd(R_PS) & PS_DAT0) break;
++		delay(1);
++		if (i == 999999) return ETIMEDOUT;
++	}
++	/* Confirm the card returned to TRAN and is ready before completing the bio. */
++	for (unsigned i = 0; i < 1000; i++) {
++		uint32_t r1 = 0;
++		if (!sd_command(13, sd.rca, 1, &r1) && (r1 & (1u << 8)) && (((r1 >> 9) & 0xf) == 4))
++			return 0;
++		delay(1000);
++	}
++	return EIO;
++}
++
++static int
+ sd_set_clock_div(uint32_t div)
+ {
+ 	uint32_t cfg = sd_rd(R_CFG);
+@@ -329,7 +408,7 @@
+ 	return ENOENT;
+ }
+ 
+-static int sd_open(__unused dev_t d, int f, __unused int t, __unused struct proc *p) { return !sd.ready ? ENXIO : ((f & FWRITE) ? EROFS : 0); }
++static int sd_open(__unused dev_t d, __unused int f, __unused int t, __unused struct proc *p) { return !sd.ready ? ENXIO : 0; }
+ static int sd_close(__unused dev_t d, __unused int f, __unused int t, __unused struct proc *p) { return 0; }
+ 
+ static void
+@@ -340,7 +419,7 @@
+ 	uint64_t off = (uint64_t)buf_blkno(bp) * DEV_BSIZE;
+ 	uint32_t count = buf_count(bp);
+ 	buf_setresid(bp, count);
+-	if (!(buf_flags(bp) & B_READ)) { error = EROFS; goto done; }
++	bool writing = (buf_flags(bp) & B_READ) == 0;
+ 	if (off > sd.count * SD_SECTOR || count > sd.count * SD_SECTOR - off) { error = EINVAL; goto done; }
+ 	if (!count) goto done;
+ 	if (buf_map(bp, &va)) { error = EIO; goto done; }
+@@ -349,9 +428,19 @@
+ 		uint64_t pos = off + copied;
+ 		uint32_t skip = (uint32_t)(pos % SD_SECTOR);
+ 		uint32_t n = MIN(count - copied, SD_SECTOR - skip);
+-		error = sd_read_sector(sd.first + pos / SD_SECTOR, sd.bounce);
+-		if (error) break;
+-		memcpy(va + copied, sd.bounce + skip, n);
++		if (writing && (skip != 0 || n != SD_SECTOR)) {
++			error = sd_read_sector(sd.first + pos / SD_SECTOR, sd.bounce);
++			if (error) break;
++		}
++		if (writing) {
++			memcpy(sd.bounce + skip, va + copied, n);
++			error = sd_write_sector(sd.first + pos / SD_SECTOR, sd.bounce);
++			if (error) break;
++		} else {
++			error = sd_read_sector(sd.first + pos / SD_SECTOR, sd.bounce);
++			if (error) break;
++			memcpy(va + copied, sd.bounce + skip, n);
++		}
+ 		copied += n;
+ 		buf_setresid(bp, count - copied);
+ 	}
+@@ -372,9 +461,9 @@
+ 	case DKIOCSETBLOCKSIZE: return ch ? ENODEV : (*f == DEV_BSIZE ? 0 : EINVAL);
+ 	case DKIOCGETPHYSICALBLOCKSIZE: *f = SD_SECTOR; return 0;
+ 	case DKIOCGETBLOCKCOUNT: *o = sd.count * SD_SECTOR / DEV_BSIZE; return 0;
+-	case DKIOCISWRITABLE: *f = 0; return 0;
++	case DKIOCISWRITABLE: *f = 1; return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTREAD: *o = 128; return 0;
+-	case DKIOCGETMAXBLOCKCOUNTWRITE: *o = 0; return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE: *o = 1; return 0;
+ 	case DKIOCGETMAXSEGMENTCOUNTREAD:
+ 	case DKIOCGETMAXSEGMENTCOUNTWRITE: *o = 1; return 0;
+ 	default: return ENOTTY;
+@@ -384,7 +473,7 @@
+ static int sd_cioctl(dev_t d, u_long c, caddr_t a, int f, struct proc *p) { return sd_ioctl(d,c,a,f,p,1); }
+ static int sd_psize(__unused dev_t d) { return sd.ready ? (int)MIN(sd.count * SD_SECTOR / DEV_BSIZE, INT_MAX) : -1; }
+ static int sd_read(dev_t d, struct uio *u, __unused int f) { return physio(sd_strategy, NULL, d, B_READ, minphys, u, DEV_BSIZE); }
+-static int sd_write(__unused dev_t d, __unused struct uio *u, __unused int f) { return EROFS; }
++static int sd_write(dev_t d, struct uio *u, __unused int f) { return physio(sd_strategy, NULL, d, B_WRITE, minphys, u, DEV_BSIZE); }
+ 
+ static const struct bdevsw sweet_sd_bdevsw = {
+ 	.d_open = sd_open, .d_close = sd_close, .d_strategy = sd_strategy,
+@@ -436,7 +525,7 @@
+ 	devfs_make_node(sd.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdroot0");
+ 	devfs_make_node(makedev(sd.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdroot0");
+ 	sd.ready = true;
+-	printf("SWEET SD: '%s' start %llu sectors count %llu, read-only at 6.5MHz\n",
++	printf("SWEET SD: '%s' start %llu sectors count %llu at 6.5MHz\n",
+ 	    part, sd.first, sd.count);
+ 	return 0;
+ }
