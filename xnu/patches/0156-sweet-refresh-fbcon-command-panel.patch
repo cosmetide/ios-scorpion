@@ -1,0 +1,34 @@
+﻿diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -30,6 +30,6 @@ static unsigned int early_row, early_col;
+ /* LK leaves MT6781's OVL/DSI path configured. In command mode the panel's
+  * GRAM changes only when the DSI host starts a frame transfer. */
+-static void
++void
+ sweet_early_refresh(void)
+ {
+ 	if (early_dsi == 0) {
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -21,6 +21,7 @@
+ #define SWEET_EARLY_DSI_BLOCK   0x14000000ULL
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
++void sweet_early_refresh(void);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t fb_base, uint64_t dsi_base);
+ void sweet_early_disable(void);
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -746,5 +746,8 @@ fbcon_newline(void)
+ 	fbcon_col = 0;
+ 	fbcon_row = (fbcon_row + 1) % fbcon_rows;
+ 	fbcon_clear_row(fbcon_row);
+ 	fbcon_clear_row((fbcon_row + 1) % fbcon_rows);
++#if defined(SWEET)
++	sweet_early_refresh();
++#endif
+ }
