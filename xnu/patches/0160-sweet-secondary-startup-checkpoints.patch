@@ -18,8 +18,7 @@
  	}
  
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u slave_main thread=%p\n",
-+	    current_cpu_number(), thread);
++	kprintf("SWEET SMP: slave_main thread=%p\n", thread);
 +#endif
  	load_context(thread);
  	/*NOTREACHED*/
@@ -27,11 +26,11 @@
  	thread_t                self = current_thread();
  
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u processor_start_thread enter\n", processor->cpu_id);
++	kprintf("SWEET SMP: processor_start_thread enter\n");
 +#endif
  	slave_machine_init(machine_param);
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u slave_machine_init returned\n", processor->cpu_id);
++	kprintf("SWEET SMP: slave_machine_init returned\n");
 +#endif
  
 --- a/osfmk/arm64/machine_routines.c
