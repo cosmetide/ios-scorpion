@@ -1,4 +1,4 @@
-﻿diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+Ã¯Â»Â¿diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
 new file mode 100644
 index 0000000..1111111
 --- /dev/null
@@ -419,25 +419,13 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 @@ -107,2 +107,3 @@
  bsd/dev/sweet_ufs.c			standard
 +bsd/dev/sweet_sd.c			standard
- bsd/dev/mem.c			standard
+ bsd/dev/sweet_sample.c			standard
 
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -766,14 +766,26 @@
- #if defined(ARM64_BOARD_CONFIG_SWEET)
- 	if (strcmp(rdBootVar, "ufsroot0") == 0) {
- 		extern int sweet_ufs_rootdev(dev_t *dev);
- 		OSSafeReleaseNULL(matching);
- 		int ufs_error = sweet_ufs_rootdev(root);
- 		if (ufs_error) {
- 			panic("IOFindBSDRoot: SWEET UFS root %s unavailable: %d", rdBootVar, ufs_error);
- 		}
- 		strlcpy(rootName, rdBootVar, rootNameSize);
- 		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
- 		*oflags = 0;
- 		goto iofrootx;
- 	}
+@@ -785,0 +786,14 @@
++#if defined(ARM64_BOARD_CONFIG_SWEET)
 +	if (strcmp(rdBootVar, "sdroot0") == 0) {
 +		extern int sweet_sd_rootdev(dev_t *dev);
 +		OSSafeReleaseNULL(matching);
@@ -450,17 +438,15 @@ diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 +		*oflags = 0;
 +		goto iofrootx;
 +	}
- #endif
++#endif
 
 diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
 --- a/iokit/Kernel/arm/VivaPwrap.cpp
 +++ b/iokit/Kernel/arm/VivaPwrap.cpp
-@@ -199,2 +199,8 @@ static const struct {
- 	{ 0x1c60, 0x0002, 0x01 },       /* LDO_VCN18_OP_CFG: HW0_OP_CFG */
+@@ -189,0 +190,6 @@
 +	/* X670 MSDC1 microSD rails: fixed 3.0 V and enable only. */
 +	{ 0x1e4c, 0x0fff, 0x0b00 },     /* LDO_VMC: 3.0 V selector */
 +	{ 0x1cc4, 0x0001, 0x0001 },     /* LDO_VMC: enable */
 +	{ 0x1e48, 0x0700, 0x0300 },     /* VMCH: 3.0 V selector */
 +	{ 0x1cd8, 0x0001, 0x0001 },     /* VMCH: enable */
 +	{ 0x1d70, 0x0005, 0x0001 },     /* VMCH EINT low: enable, active low */
- };
