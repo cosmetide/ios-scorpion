@@ -50,9 +50,22 @@ jobs:
           # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
-          # GitHub release downloads can intermittently return an error body
-          # with HTTP 200. Retry and fail on bad HTTP responses before hdiutil.
-          sed -i '' 's/curl --progress-bar --max-time 900 --connect-timeout 60 -L -o \/tmp\/KDK.dmg /curl --fail --retry 5 --retry-all-errors --retry-delay 5 --progress-bar --max-time 900 --connect-timeout 60 -L -o \/tmp\/KDK.dmg /' dxb/build.sh
+          # Download KDKs through the GitHub release-asset API. The browser
+          # download URL intermittently returns 504 on hosted runners, while
+          # the API's octet-stream redirect works reliably.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("dxb/build.sh")
+          text = path.read_text()
+          old = '        curl --progress-bar --max-time 900 --connect-timeout 60 -L -o /tmp/KDK.dmg "${KDK_URL}"'
+          new = '''        KDK_TAG=$(basename "$(dirname "$KDK_URL")")
+          KDK_FILE=$(basename "$KDK_URL")
+          KDK_ASSET_ID=$(curl --fail --retry 5 --retry-all-errors --retry-delay 5 -sS "https://api.github.com/repos/dortania/KdkSupportPkg/releases/tags/$KDK_TAG" | python3 -c 'import json,sys; name=sys.argv[1]; print(next(a["id"] for a in json.load(sys.stdin)["assets"] if a["name"] == name))' "$KDK_FILE")
+          curl --fail --retry 5 --retry-all-errors --retry-delay 5 --progress-bar --max-time 1800 --connect-timeout 60 -L -H 'Accept: application/octet-stream' -o /tmp/KDK.dmg "https://api.github.com/repos/dortania/KdkSupportPkg/releases/assets/$KDK_ASSET_ID"'''
+          if text.count(old) != 1:
+              raise SystemExit("expected one KDK download command in dxb/build.sh")
+          path.write_text(text.replace(old, new))
+          PY
           grep -n 'KDK.dmg' dxb/build.sh
           ls dxb/patches
 
@@ -103,7 +116,9 @@ jobs:
         if: always()
         run: |
           mkdir -p out/kdk-libs
-          for lib in /Library/Developer/KDKs/*/System/Library/KernelSupport/lib*.a; do
+          shopt -s nullglob
+          libs=(/Library/Developer/KDKs/*/System/Library/KernelSupport/lib*.a)
+          for lib in "${libs[@]}"; do
             b=$(basename "$lib" .a)
             ar t "$lib" > "out/kdk-libs/$b.members.txt" 2>&1 || true
             nm -m "$lib" > "out/kdk-libs/$b.nm.txt" 2>&1 || true
