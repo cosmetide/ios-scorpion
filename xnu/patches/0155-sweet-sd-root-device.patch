@@ -39,7 +39,7 @@ index 0000000..1111111
 +#define R_INT       0x00c
 +#define R_INTEN     0x010
 +#define R_FIFOCS    0x014
-+#define R_RXDATA    0x020
++#define R_RXDATA    0x01c
 +#define R_SDC_CFG   0x030
 +#define R_SDC_CMD   0x034
 +#define R_SDC_ARG   0x038
