@@ -1,15 +1,30 @@
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -797,3 +797,9 @@
+@@ -797,15 +797,24 @@
  #if MONOTONIC && defined(__arm64__)
-+#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u before mt_wake_per_core\n", cpu_data_ptr->cpu_number);
-+#endif
  	mt_wake_per_core();
-+#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u before slave_main\n", cpu_data_ptr->cpu_number);
-+#endif
  #endif /* MONOTONIC && defined(__arm64__) */
++#if defined(SWEET)
++	if (cpu_data_ptr->cpu_number == 1) kprintf("SMP1:A after-online\n");
++#endif
+ 
+ #if defined(KERNEL_INTEGRITY_CTRR)
++#if defined(SWEET)
++	if (cpu_data_ptr->cpu_number == 1) kprintf("SMP1:B before-ctrr\n");
++#endif
+ 	if (ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id] != CTRR_LOCKED) {
+ 		lck_spin_lock(&ctrr_cpu_start_lck);
+ 		ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id] = CTRR_LOCKED;
+ 		thread_wakeup(&ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id]);
+ 		lck_spin_unlock(&ctrr_cpu_start_lck);
+ 	}
+ #endif
+ 
+ 
++#if defined(SWEET)
++	if (cpu_data_ptr->cpu_number == 1) kprintf("SMP1:C before-slave-main\n");
++#endif
+ 	slave_main(NULL);
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
 @@ -847,6 +847,9 @@
@@ -18,7 +33,7 @@
  	}
  
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: slave_main thread=%p\n", thread);
++	if (processor->cpu_id == 1) kprintf("SMP1:D slave-main\n");
 +#endif
  	load_context(thread);
  	/*NOTREACHED*/
@@ -26,11 +41,11 @@
  	thread_t                self = current_thread();
  
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: processor_start_thread enter\n");
++	if (processor->cpu_id == 1) kprintf("SMP1:E thread-start\n");
 +#endif
  	slave_machine_init(machine_param);
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: slave_machine_init returned\n");
++	if (processor->cpu_id == 1) kprintf("SMP1:F machine-init-return\n");
 +#endif
  
 --- a/osfmk/arm64/machine_routines.c
@@ -40,14 +55,14 @@
  slave_machine_init(__unused void *param)
  {
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u cpu_machine_init enter\n", cpu_number());
++	if (cpu_number() == 1) kprintf("SMP1:G cpu-init-enter\n");
 +#endif
  	cpu_machine_init();     /* Initialize the processor */
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u cpu_machine_init returned\n", cpu_number());
++	if (cpu_number() == 1) kprintf("SMP1:H cpu-init-return\n");
 +#endif
  	clock_init();           /* Init the clock */
 +#if defined(SWEET)
-+	kprintf("SWEET SMP: cpu=%u clock_init returned\n", cpu_number());
++	if (cpu_number() == 1) kprintf("SMP1:I clock-init-return\n");
 +#endif
  }
