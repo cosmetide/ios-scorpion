@@ -216,20 +216,17 @@ diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -1,10 +1,15 @@
- #if defined(ARM64_BOARD_CONFIG_SWEET)
- 	if (strcmp(rdBootVar, "sdroot0") == 0) {
- 		extern int sweet_sd_rootdev(dev_t *dev);
-+		extern void sweet_sd_error_detail(const char **, uint32_t *, uint32_t *, uint64_t *, uint32_t *, uint32_t *);
+@@ -790,7 +790,12 @@
  		OSSafeReleaseNULL(matching);
  		int sd_error = sweet_sd_rootdev(root);
  		if (sd_error) {
 -			panic("IOFindBSDRoot: SWEET SD root %s unavailable: %d", rdBootVar, sd_error);
++			extern void sweet_sd_error_detail(const char **, uint32_t *, uint32_t *, uint64_t *, uint32_t *, uint32_t *);
 +			const char *stage = "unknown";
 +			uint32_t op = 0, arg = 0, status = 0, got = 0;
 +			uint64_t lba = 0;
 +			sweet_sd_error_detail(&stage, &op, &arg, &lba, &status, &got);
-+			panic("IOFindBSDRoot: SWEET SD root %s unavailable: %d stage=%s cmd=%u arg=%08x lba=%llu status=%08x got=%u", rdBootVar, sd_error, stage, op, arg, lba, status, got);
++			panic("SD root error %d %s cmd%u arg=%x lba=%llu status=%x bytes=%u", sd_error, stage, op, arg, lba, status, got);
  		}
  		strlcpy(rootName, rdBootVar, rootNameSize);
  		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
