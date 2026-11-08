@@ -793,4 +793,9 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - Parsed the supplied IPSW BuildManifest: OS=`096-04088-077.dmg`, Cryptex1,SystemOS=`096-04666-078.dmg`, Cryptex1,AppOS=`096-03536-083.dmg`. `tools/viva-build-iosroot.sh` still needs Linux `apfs-fuse`, HFS+ tools, rsync and root mount; this Windows host has no Linux distro. Therefore no `iosroot.img` exists and the SD-card is not yet fully bootable into iOS userspace.
 - No physical SD card was inserted, and neither phone nor internal UFS/userdata was written. The images are build-verified only; SD initialization and mounting still need a handset/card test.
 
-
+## 2026-11-08 XNU console follow-up
+- User reports the prior SD-root image still appears frozen at `SWEET EARLY 20`. HackiOS' porting guide says that a command-mode panel needs a display-controller refresh after framebuffer writes; the same symptom can also mean XNU stopped after its checkpoint, so the frozen display alone cannot distinguish these cases.
+- The normal SWEET framebuffer serial console in patch 0003 drew `kprintf` characters but did not refresh X670's command-mode DSI panel. Added patch `0156-sweet-refresh-fbcon-command-panel.patch` to export the existing XNU DSI refresh routine and call it at each completed framebuffer line. Commit `bc015cb` (`xnu: refresh X670 panel for framebuffer logs`) was pushed to `x670`.
+- GitHub Actions run `42464410784` succeeded. Its log confirms patch 0156 was applied. Kernel artifact SHA256: `98e5fa7033546717ce1fe490bcd51c97cb41044b58f900d7e8e4d98b6217159a`.
+- Packaged a new SD-root candidate at `../work/x670-sd-flash-package/scorpion-boot-fbcon-refresh.img`, SHA256 `94dd1ce0a13d015ae0ca59c933ee84da4a64bc6c63fe782fbadaf9f58cfdd810`. It retains the stock Android v2 header and DTB, embeds the new XNU artifact, and uses `rd=sdroot0 sdroot=iosroot cpus=8`. Its ramdisk exactly matches the generated SWEETXNU payload. It has not been copied to the SD card or booted.
+- The connected phone was not enumerating in ADB when checked. No boot partition, SD card or internal storage was written. The user must authorize any device write before installation.
