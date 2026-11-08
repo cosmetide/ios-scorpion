@@ -424,7 +424,13 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -785,0 +786,14 @@
+@@ -781,12 +781,27 @@
+ 		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+ 		*oflags = 0;
+ 		goto iofrootx;
+ 	}
+ #endif
+ 
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +	if (strcmp(rdBootVar, "sdroot0") == 0) {
 +		extern int sweet_sd_rootdev(dev_t *dev);
@@ -439,14 +445,57 @@ diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 +		goto iofrootx;
 +	}
 +#endif
-
++
+ //
+ //	Now check if we are trying to root on a memory device
+ //
+ 
+ 	if ((rdBootVar[0] == 'm') && (rdBootVar[1] == 'd') && (rdBootVar[3] == 0)) {
+ 		dchar = xchar = rdBootVar[2];                                                   /* Get the actual device */
 diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
 --- a/iokit/Kernel/arm/VivaPwrap.cpp
 +++ b/iokit/Kernel/arm/VivaPwrap.cpp
-@@ -189,0 +190,6 @@
+@@ -183,12 +183,18 @@
+ 	uint16_t addr, mask, max;
+ } gVivaRegulatorRegs[] = {
+ 	{ 0x1508, 0x0001, 0x01 },       /* BUCK_VGPU_CON0: RG_BUCK_VGPU_EN */
+ 	{ 0x1526, 0x007f, 0x40 },       /* BUCK_VGPU_ELR0: RG_BUCK_VGPU_VOSEL, <= 0.9 V */
+ 	{ 0x1bc8, 0x0001, 0x01 },       /* LDO_VSRAM_GPU_CON0: RG_LDO_VSRAM_GPU_EN */
+ 	{ 0x1bf4, 0x007f, 0x50 },       /* LDO_VSRAM_CON3: RG_LDO_VSRAM_GPU_VOSEL, <= 1.0 V */
 +	/* X670 MSDC1 microSD rails: fixed 3.0 V and enable only. */
-+	{ 0x1e4c, 0x0fff, 0x0b00 },     /* LDO_VMC: 3.0 V selector */
-+	{ 0x1cc4, 0x0001, 0x0001 },     /* LDO_VMC: enable */
-+	{ 0x1e48, 0x0700, 0x0300 },     /* VMCH: 3.0 V selector */
-+	{ 0x1cd8, 0x0001, 0x0001 },     /* VMCH: enable */
-+	{ 0x1d70, 0x0005, 0x0001 },     /* VMCH EINT low: enable, active low */
++	{ 0x1e4c, 0x0fff, 0x0fff },     /* LDO_VMC selector */
++	{ 0x1cc4, 0x0001, 0x0001 },     /* LDO_VMC enable */
++	{ 0x1e48, 0x0700, 0x0007 },     /* VMCH selector */
++	{ 0x1cd8, 0x0001, 0x0001 },     /* VMCH enable */
++	{ 0x1d70, 0x0005, 0x0005 },     /* VMCH EINT low */
+ };
+ 
+ IOReturn
+ VivaPwrap::writeRegulator(uint32_t addr, uint32_t mask, uint32_t value)
+ {
+ 	unsigned int i;
+@@ -272,14 +278,23 @@
+ 		nub->release();
+ 	}
+ 	OSSafeReleaseNULL(children);
+ }
+ 
+ extern "C" int
+-viva_pwrap_read(uint32_t addr, uint32_t *value)
++viva_pwrap_write_regulator(uint32_t addr, uint32_t mask, uint32_t value)
+ {
+ 	if (gVivaPwrap == NULL) {
+ 		return -1;
+ 	}
++	return gVivaPwrap->writeRegulator(addr, mask, value) == kIOReturnSuccess ? 0 : -2;
++}
++
++extern "C" int
++viva_pwrap_read(uint32_t addr, uint32_t *value)
++{
++	if (gVivaPwrap == NULL) {
++		return -1;
++	}
+ 	return gVivaPwrap->readPMIC(addr, value) == kIOReturnSuccess ? 0 : -2;
+ }
+ #endif /* SWEET */
