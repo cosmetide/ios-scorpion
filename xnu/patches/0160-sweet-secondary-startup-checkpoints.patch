@@ -12,7 +12,7 @@
  #endif /* MONOTONIC && defined(__arm64__) */
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -847,6 +847,10 @@
+@@ -847,6 +847,9 @@
  		thread->continuation = processor_start_thread;
  		thread->parameter = machine_param;
  	}
