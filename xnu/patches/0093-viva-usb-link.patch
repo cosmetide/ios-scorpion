@@ -312,7 +312,7 @@ index c779745..c6ca9ef 100644
 +			data = vl_cfg_desc; n = sizeof(vl_cfg_desc);
 +			break;
 +		case 3: n = vl_string(value & 0xff, vl.ep0_buf); data = vl.ep0_buf; ok = n != 0; break;
-+		case 6: data = vl_qual_desc; n = sizeof(vl_qual_desc); break;
++		case 6: if (rd8(vl.musb, MUSB_POWER) & POWER_HSENAB) { data = vl_qual_desc; n = sizeof(vl_qual_desc); } else ok = false; break;
 +		default: ok = false; break;
 +		}
 +	} else if (req == 5 && type == 0x00) {          /* SET_ADDRESS */
