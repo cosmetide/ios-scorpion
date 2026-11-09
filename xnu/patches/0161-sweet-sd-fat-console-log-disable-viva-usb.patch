@@ -1,0 +1,340 @@
+--- a/bsd/dev/sweet_sd.c
++++ b/bsd/dev/sweet_sd.c
+@@ -4,7 +4,8 @@
+  * This is a polled MT6781 MSDC1 host driver. It uses the board's
+  * fixed pin/clock/PMIC wiring, initializes a standard SD card and keeps it
+  * in 1-bit mode at a conservative clock while it reads GPT and the root, and
+- * exposes the named HFS+ partition as /dev/sdroot0. No write command is sent.
++ * exposes the named HFS+ partition as /dev/sdroot0. Diagnostic writes are
++ * confined to the preallocated XNU.LOG file on the SCORPION FAT partition.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -19,6 +20,8 @@
+ #include <kern/locks.h>
+ #include <kern/clock.h>
+ #include <kern/kalloc.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+@@ -26,6 +29,11 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern int viva_pwrap_write_regulator(uint32_t, uint32_t, uint32_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern int hz;
++extern uint32_t sweet_log_copy(uint64_t *, char *, uint32_t);
++extern uint64_t sweet_log_position(void);
+ 
+ #define R_CFG       0x000
+ #define R_IOCON     0x004
+@@ -81,6 +89,24 @@
+ 	dev_t bdev;
+ 	bool high_capacity, ready;
+ } sd;
++
++#define SWEET_LOG_SIZE          (4u << 20)
++#define SWEET_LOG_HEADER_SIZE   4096u
++#define SWEET_LOG_FILE_SIZE     (SWEET_LOG_HEADER_SIZE + SWEET_LOG_SIZE)
++#define SWEET_LOG_FILE_SECTORS  (SWEET_LOG_FILE_SIZE / SD_SECTOR)
++#define SWEET_LOG_HEADER_SECTORS (SWEET_LOG_HEADER_SIZE / SD_SECTOR)
++#define FAT32_MASK              0x0fffffffu
++#define FAT32_EOC               0x0ffffff8u
++
++static struct {
++	uint64_t first, count, volume_sectors, first_data, total_clusters;
++	uint32_t sectors_per_cluster, root_cluster, file_clusters_count;
++	uint32_t *file_clusters;
++	bool ready;
++} sweet_sd_log;
++
++static int sweet_sd_log_chan;
++static uint32_t sweet_sd_log_secs = 1;
+ 
+ static LCK_GRP_DECLARE(sweet_sd_grp, "sweet_sd");
+ static LCK_MTX_DECLARE(sweet_sd_lock, &sweet_sd_grp);
+@@ -408,6 +434,231 @@
+ 	return ENOENT;
+ }
+ 
++struct sweet_log_header {
++	char magic[8];
++	uint32_t version, size;
++	uint64_t total, seq;
++};
++
++static uint8_t sweet_sd_log_buf[4096];
++static uint8_t sweet_sd_log_header_page[SWEET_LOG_HEADER_SIZE];
++
++static uint64_t sweet_sd_log_fat_first;
++static uint32_t sweet_sd_log_reserved, sweet_sd_log_fatsz;
++static uint64_t sweet_sd_fat_cache_lba = UINT64_MAX;
++static uint8_t sweet_sd_fat_cache[SD_SECTOR];
++
++static int
++sweet_sd_fat_entry(uint32_t cluster, uint32_t *next)
++{
++	uint64_t byte_off = (uint64_t)cluster * 4;
++	uint64_t lba = sweet_sd_log_fat_first + sweet_sd_log_reserved + byte_off / SD_SECTOR;
++	if (lba >= sweet_sd_log.first + sweet_sd_log.count || byte_off / SD_SECTOR >= sweet_sd_log_fatsz) {
++		return EINVAL;
++	}
++	if (lba != sweet_sd_fat_cache_lba) {
++		int error = sd_read_sector(lba, sweet_sd_fat_cache);
++		if (error) return error;
++		sweet_sd_fat_cache_lba = lba;
++	}
++	memcpy(next, sweet_sd_fat_cache + byte_off % SD_SECTOR, sizeof(*next));
++	*next &= FAT32_MASK;
++	return 0;
++}
++
++static uint64_t
++sweet_sd_log_file_lba(uint32_t sector)
++{
++	if (!sweet_sd_log.ready) return UINT64_MAX;
++	uint32_t cluster_index = sector / sweet_sd_log.sectors_per_cluster;
++	if (sector >= SWEET_LOG_FILE_SECTORS || cluster_index >= sweet_sd_log.file_clusters_count)
++		return UINT64_MAX;
++	uint32_t cluster = sweet_sd_log.file_clusters[cluster_index];
++	uint64_t lba = sweet_sd_log.first + sweet_sd_log.first_data +
++	    (uint64_t)(cluster - 2) * sweet_sd_log.sectors_per_cluster +
++	    sector % sweet_sd_log.sectors_per_cluster;
++	return lba < sweet_sd_log.first + sweet_sd_log.volume_sectors ? lba : UINT64_MAX;
++}
++
++static int
++sweet_sd_log_find_file(uint32_t root_cluster, uint32_t *first_cluster, uint32_t *file_size)
++{
++	static const char short_name[11] = { 'X','N','U',' ',' ',' ',' ',' ','L','O','G' };
++	uint32_t cluster = root_cluster;
++	for (uint64_t walked = 0; walked < sweet_sd_log.total_clusters; walked++) {
++		if (cluster < 2 || cluster >= sweet_sd_log.total_clusters + 2) return EINVAL;
++		for (uint32_t s = 0; s < sweet_sd_log.sectors_per_cluster; s++) {
++			uint64_t rel = sweet_sd_log.first_data + (uint64_t)(cluster - 2) * sweet_sd_log.sectors_per_cluster + s;
++			if (rel >= sweet_sd_log.volume_sectors) return EINVAL;
++			int error = sd_read_sector(sweet_sd_log.first + rel, sd.bounce);
++			if (error) return error;
++			for (uint32_t off = 0; off < SD_SECTOR; off += 32) {
++				const uint8_t *entry = sd.bounce + off;
++				if (entry[0] == 0) return ENOENT;
++				if (entry[0] == 0xe5 || entry[11] == 0x0f || (entry[11] & 0x18)) continue;
++				if (memcmp(entry, short_name, sizeof(short_name))) continue;
++				uint16_t hi, lo;
++				memcpy(&hi, entry + 20, sizeof(hi));
++				memcpy(&lo, entry + 26, sizeof(lo));
++				*first_cluster = lo;
++				*first_cluster |= (uint32_t)hi << 16;
++				memcpy(file_size, entry + 28, sizeof(*file_size));
++				return 0;
++			}
++		}
++		uint32_t next;
++		int error = sweet_sd_fat_entry(cluster, &next);
++		if (error) return error;
++		if (next >= FAT32_EOC) return ENOENT;
++		cluster = next;
++	}
++	return ELOOP;
++}
++
++static int
++sweet_sd_log_init(void)
++{
++	uint8_t bpb[SD_SECTOR];
++	uint16_t bytes_per_sector, reserved;
++	uint32_t total_sectors, fatsz, root, first_cluster, file_size;
++	uint8_t fats;
++	if (!sweet_sd_log.first || !sweet_sd_log.count) return ENOENT;
++	int error = sd_read_sector(sweet_sd_log.first, bpb);
++	if (error) return error;
++	memcpy(&bytes_per_sector, bpb + 11, sizeof(bytes_per_sector));
++	memcpy(&reserved, bpb + 14, sizeof(reserved));
++	fats = bpb[16];
++	memcpy(&total_sectors, bpb + 32, sizeof(total_sectors));
++	memcpy(&fatsz, bpb + 36, sizeof(fatsz));
++	memcpy(&root, bpb + 44, sizeof(root));
++	if (bytes_per_sector != SD_SECTOR || !reserved || !fats || fats > 2 || !fatsz ||
++	    !total_sectors || total_sectors > sweet_sd_log.count || root < 2 ||
++	    memcmp(bpb + 82, "FAT32   ", 8)) return EINVAL;
++	sweet_sd_log.sectors_per_cluster = bpb[13];
++	if (!sweet_sd_log.sectors_per_cluster ||
++	    (sweet_sd_log.sectors_per_cluster & (sweet_sd_log.sectors_per_cluster - 1))) return EINVAL;
++	sweet_sd_log.first_data = reserved + (uint64_t)fats * fatsz;
++	if (sweet_sd_log.first_data >= total_sectors) return EINVAL;
++	sweet_sd_log.volume_sectors = total_sectors;
++	sweet_sd_log.total_clusters = (total_sectors - sweet_sd_log.first_data) /
++	    sweet_sd_log.sectors_per_cluster;
++	sweet_sd_log.root_cluster = root;
++	sweet_sd_log_reserved = reserved;
++	sweet_sd_log_fatsz = fatsz;
++	sweet_sd_log_fat_first = sweet_sd_log.first;
++	error = sweet_sd_log_find_file(root, &first_cluster, &file_size);
++	if (error) return error;
++	if (file_size < SWEET_LOG_FILE_SIZE) return ENOSPC;
++	sweet_sd_log.file_clusters_count = (SWEET_LOG_FILE_SECTORS +
++	    sweet_sd_log.sectors_per_cluster - 1) / sweet_sd_log.sectors_per_cluster;
++	if (sweet_sd_log.file_clusters_count > sweet_sd_log.total_clusters) return EINVAL;
++	sweet_sd_log.file_clusters = (uint32_t *)kalloc_data(
++	    sweet_sd_log.file_clusters_count * sizeof(uint32_t), Z_WAITOK | Z_ZERO);
++	if (!sweet_sd_log.file_clusters) return ENOMEM;
++	uint32_t cluster = first_cluster;
++	for (uint32_t i = 0; i < sweet_sd_log.file_clusters_count; i++) {
++		if (cluster < 2 || cluster >= sweet_sd_log.total_clusters + 2) return EINVAL;
++		sweet_sd_log.file_clusters[i] = cluster;
++		if (i + 1 < sweet_sd_log.file_clusters_count) {
++			error = sweet_sd_fat_entry(cluster, &cluster);
++			if (error || cluster >= FAT32_EOC) return error ? error : EINVAL;
++		}
++	}
++	sweet_sd_log.ready = true;
++	return 0;
++}
++
++static int
++sweet_sd_log_write_bytes(uint64_t file_off, const uint8_t *data, uint32_t size)
++{
++	while (size) {
++		uint32_t sector = (uint32_t)(file_off / SD_SECTOR);
++		uint32_t in_sector = (uint32_t)(file_off % SD_SECTOR);
++		uint32_t n = MIN(size, SD_SECTOR - in_sector);
++		uint64_t lba = sweet_sd_log_file_lba(sector);
++		if (lba == UINT64_MAX) return EINVAL;
++		if (in_sector || n != SD_SECTOR) {
++			int error = sd_read_sector(lba, sd.bounce);
++			if (error) return error;
++		} else {
++			bzero(sd.bounce, SD_SECTOR);
++		}
++		memcpy(sd.bounce + in_sector, data, n);
++		int error = sd_write_sector(lba, sd.bounce);
++		if (error) return error;
++		file_off += n;
++		data += n;
++		size -= n;
++	}
++	return 0;
++}
++
++static void
++sweet_sd_log_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t readpos = 0, seq = 0;
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
++	if (!on) return;
++	PE_parse_boot_argn("sweetlogsecs", &sweet_sd_log_secs, sizeof(sweet_sd_log_secs));
++	if (!sweet_sd_log_secs || sweet_sd_log_secs > 30) sweet_sd_log_secs = 1;
++	printf("SWEET LOG SD: writing the console ring to SCORPION:/XNU.LOG every %u s\n",
++	    sweet_sd_log_secs);
++	for (;;) {
++		(void)tsleep(&sweet_sd_log_chan, PZERO, "sweetlogsd", hz * (int)sweet_sd_log_secs);
++		uint64_t total = sweet_log_position();
++		uint64_t oldest = total > SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : 0;
++		if (readpos < oldest) readpos = oldest;
++		if (readpos == total) continue;
++		int error = 0;
++		lck_mtx_lock(&sweet_sd_lock);
++		while (readpos < total && !error) {
++			uint32_t n = sweet_log_copy(&readpos, (char *)sweet_sd_log_buf,
++			    (uint32_t)MIN((uint64_t)sizeof(sweet_sd_log_buf), total - readpos));
++			if (!n) break;
++			uint64_t start = readpos - n;
++			uint64_t ring_off = start % SWEET_LOG_SIZE;
++			uint32_t left = n;
++			const uint8_t *p = sweet_sd_log_buf;
++			while (left && !error) {
++				uint32_t chunk = (uint32_t)MIN((uint64_t)left, SWEET_LOG_SIZE - ring_off);
++				error = sweet_sd_log_write_bytes(SWEET_LOG_HEADER_SIZE + ring_off, p, chunk);
++				p += chunk;
++				left -= chunk;
++				ring_off = 0;
++			}
++		}
++		if (!error) {
++			struct sweet_log_header h = {
++				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++				.version = 1, .size = SWEET_LOG_SIZE,
++				.total = readpos, .seq = ++seq,
++			};
++			bzero(sweet_sd_log_header_page, sizeof(sweet_sd_log_header_page));
++			memcpy(sweet_sd_log_header_page, &h, sizeof(h));
++			error = sweet_sd_log_write_bytes(0, sweet_sd_log_header_page,
++			    sizeof(sweet_sd_log_header_page));
++		}
++		lck_mtx_unlock(&sweet_sd_lock);
++		if (error) {
++			printf("SWEET LOG SD: write failed (%d), stopping\n", error);
++			return;
++		}
++	}
++}
++
++static void
++sweet_sd_log_start(void)
++{
++	thread_t thread;
++	if (!sweet_sd_log.ready) {
++		printf("SWEET LOG SD: XNU.LOG missing or invalid on SCORPION FAT partition\n");
++		return;
++	}
++	if (kernel_thread_start(sweet_sd_log_thread, NULL, &thread) == KERN_SUCCESS)
++		thread_deallocate(thread);
++}
++
+ static int sd_open(__unused dev_t d, __unused int f, __unused int t, __unused struct proc *p) { return !sd.ready ? ENXIO : 0; }
+ static int sd_close(__unused dev_t d, __unused int f, __unused int t, __unused struct proc *p) { return 0; }
+ 
+@@ -517,6 +768,19 @@
+ 		    sd.last_lba, sd.last_status, sd_rd(R_CFG), sd_rd(R_INT), sd_rd(R_FIFOCS), sd.last_got);
+ 		return error;
+ 	}
++	/* Save the HFS root bounds while locating the independent FAT log volume. */
++	uint64_t root_first = sd.first, root_count = sd.count;
++	char logpart[64] = "SCORPION_BOOT";
++	PE_parse_boot_argn("scorpion", logpart, sizeof(logpart));
++	int log_error = sd_find_partition(logpart);
++	if (log_error && strcmp(logpart, "SCORPION"))
++		log_error = sd_find_partition("SCORPION");
++	if (!log_error) {
++		sweet_sd_log.first = sd.first;
++		sweet_sd_log.count = sd.count;
++	}
++	sd.first = root_first;
++	sd.count = root_count;
+ 	sd.bmajor = bdevsw_add(-1, &sweet_sd_bdevsw);
+ 	if (sd.bmajor < 0) return ENXIO;
+ 	sd.cmajor = cdevsw_add_with_bdev(-1, &sweet_sd_cdevsw, sd.bmajor);
+@@ -527,6 +791,10 @@
+ 	sd.ready = true;
+ 	printf("SWEET SD: '%s' start %llu sectors count %llu at 6.5MHz\n",
+ 	    part, sd.first, sd.count);
++	if (!log_error) log_error = sweet_sd_log_init();
++	if (log_error)
++		printf("SWEET LOG SD: SCORPION FAT setup failed (%d); boot continues without disk logging\n",
++		    log_error);
+ 	return 0;
+ }
+ 
+@@ -549,6 +817,7 @@
+ 	if (!sd.ready) {
+ 		int e = sweet_sd_init();
+ 		if (e) return e;
++		sweet_sd_log_start();
+ 	}
+ 	*dev = sd.bdev;
+ 	return 0;
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -767,8 +767,6 @@
+ 	}
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-	extern void viva_usb_probe(void);
+-	viva_usb_probe();
+ //
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+ //

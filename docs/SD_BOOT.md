@@ -11,6 +11,31 @@ XNU initializes MSDC1 and mounts the named HFS+ partition read-only with
 `rd=sdroot0` (the driver defaults to
 partition name `iosroot`).
 
+## Save XNU logs on the SCORPION FAT volume
+
+Before booting, create a preallocated `XNU.LOG` file in the FAT partition's
+root directory from PowerShell:
+
+```powershell
+.\tools\prepare-sd-log.ps1 -Drive D:
+```
+
+Use the drive letter currently assigned to the SCORPION volume. The file is
+4,198,400 bytes (4 KiB header plus 4 MiB log ring). XNU follows its FAT32
+cluster chain and writes only into the file's allocated data clusters; it does
+not update FAT metadata. Keep the file in the volume root and do not resize or
+delete it while testing.
+
+The XNU SD logger flushes once per second by default. After a test, power the
+phone down, connect the card to the host, then decode the log:
+
+```powershell
+.\tools\sweet-sd-log-pull.ps1 -Drive D: -OutFile .\logs\x670-boot.txt
+```
+
+`viva_usb_probe()` is not called on the X670 path; this diagnostic uses the
+preallocated FAT log file instead of the viva USB link.
+
 ## Build inputs
 
 1. Build the `SWEET` XNU kernel with the patches in `xnu/patches/` using the
