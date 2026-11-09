@@ -10,19 +10,15 @@ index d0aef66..db0af8e 100644
  	return 0;
  }
  
-@@ -829,6 +828,12 @@ int sweet_ufs_rootdev(dev_t *dev);
- int
- sweet_ufs_rootdev(dev_t *dev)
- {
-+	static bool viva_usb_done;
-+	if (!viva_usb_done) {
-+		/* before storage, so a UFS failure can still be read over USB */
-+		viva_usb_done = true;
-+		viva_usb_probe();
-+	}
- 	if (!su.ready) {
- 		int error = sweet_ufs_init();
- 		if (error) {
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -766,3 +766,5 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
++	extern void viva_usb_probe(void);
++	viva_usb_probe();
+ //
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
 diff --git a/bsd/dev/viva_usb.c b/bsd/dev/viva_usb.c
 index c779745..c6ca9ef 100644
 --- a/bsd/dev/viva_usb.c
