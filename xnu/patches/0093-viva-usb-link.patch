@@ -124,7 +124,7 @@ index c779745..c6ca9ef 100644
 +#define TXCSR_FLUSHFIFO 0x0008
 +#define TXCSR_SENTSTALL 0x0020
 +#define TXCSR_CLRDATATOG 0x0040
-+#define TXCSR_MODE      0x2000
++#define TXCSR_MODE      0x0000          /* peripheral mode: host MODE bit stays clear */
 +#define RXCSR_RXPKTRDY  0x0001
 +#define RXCSR_FLUSHFIFO 0x0010
 +#define RXCSR_CLRDATATOG 0x0080
