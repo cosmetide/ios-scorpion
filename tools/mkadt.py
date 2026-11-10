@@ -260,6 +260,79 @@ def viva_devices(ph, phandle, gic_ph, ecid):
     ]
 
 
+def x670_button_devices(ph, phandle, gic_ph):
+    """X670 MT6781 keypad/PMIC keys and passive GT9896S touch probe."""
+    io = lambda pa, size: u64(pa - SOC_BASE, size)
+    eint_ph = next(phandle)
+    keypad = node('keypad', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-keypad')),
+        ('reg', io(0x10010000, 0x1000)),
+        ('interrupt-parent', u32(gic_ph)),
+        # Stock X670 DTB: GIC SPI 73, rising edge.
+        ('interrupts', spi(0x49, IRQ_EDGE_RISING)),
+        # The MT6781 keypad bit-0 volume-down mapping is confirmed on viva;
+        # X670 key events remain visible in the SD log for on-device validation.
+        ('keymap', u32(0, HID_CSMR_VOLUME_DOWN)),
+    ])
+    i2c0 = node('i2c0', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-i2c')),
+        ('reg', io(0x11007000, 0x1000)),
+        ('interrupt-parent', u32(gic_ph)),
+        # Stock X670 DTB i2c0 IRQ: GIC SPI 105.
+        ('interrupts', spi(0x69, IRQ_LEVEL_HIGH)),
+        ('clock-frequency', u32(400000)),
+        ('source-clock', u32(124800000)),
+        ('clock-div', u32(5)),
+        ('ext-time-config', u32(0x1801)),
+    ], [node('touch', [
+        ph(),
+        ('compatible', cstr('goodix,gt9896')),
+        ('i2c-address', u32(0x5d)),
+        ('max-x', u32(8640)),
+        # X670's vendor config is the 1080x2300 panel variant.
+        ('max-y', u32(18400)),
+        ('reg-coor', u32(0x4180)),
+        ('reg-pid', u32(0x4022)),
+        ('reg-fw-request', u32(0x4180)),
+        # Probe the LK-initialized controller only; do not drive unverified
+        # X670 reset/power pins or assume the viva EINT 13 wiring.
+        ('skip-power-sequence', u32(1)),
+        ('polling-ms', u32(50)),
+        ('trace-events', u32(1)),
+    ])])
+    eint = node('eint', [
+        ('AAPL,phandle', u32(eint_ph)),
+        ('compatible', cstr('mediatek,mt6781-eint')),
+        ('reg', io(0x1000b000, 0x1000)),
+        ('interrupt-controller', b''),
+        ('#interrupt-cells', u32(2)),
+        ('interrupt-parent', u32(gic_ph)),
+        # Stock X670 DTB GPIO/EINT controller parent: GIC SPI 186, level high.
+        ('interrupts', spi(0xba, IRQ_LEVEL_HIGH)),
+    ])
+    keys = node('keys', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6366-keys')),
+        ('keymap', u32(0, HID_CSMR_POWER, 1, HID_CSMR_VOLUME_UP)),
+    ])
+    pmic = node('pmic', [
+        ph(),
+        # The X670 stock DTB labels this MT6358; its boot log identifies the
+        # responding silicon as hwcid 0x6610 (MT6366), which this driver supports.
+        ('compatible', cstr('mediatek,mt6366-pmic')),
+        ('interrupt-parent', u32(eint_ph)),
+        ('interrupts', u32(144, IRQ_LEVEL_HIGH)),
+    ], [keys])
+    pwrap = node('pwrap', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-pwrap')),
+        ('reg', io(0x1000d000, 0x1000)),
+    ], [pmic])
+    return [keypad, eint, i2c0], pwrap
+
+
 def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     viva=True: Redmi Note 11 Pro 4G addresses. Without viva_ufs there is no UFS node, so the
@@ -379,9 +452,11 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
         ('virtual-timer-intid', u32(vtimer)),
         ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
     ])
-    # X670 needs the existing PMIC wrapper service for removable-card rails.
-    # Its reg is relative to /arm-io's SOC_BASE range, like the GIC nodes.
-    pwrap = node('pwrap', [
+    # X670's stock DTB provides the MT6781 keypad/EINT/pwrap blocks. The
+    # runtime log identifies this handset's PMIC as MT6366 (hwcid 0x6610).
+    x670_input_nodes, x670_pwrap = x670_button_devices(ph, phandle, gic_ph) if x670 else ([], None)
+    # The PMIC wrapper is also needed for removable-card rails on X670.
+    pwrap = x670_pwrap if x670 else node('pwrap', [
         ph(),
         ('compatible', cstr('mediatek,mt6781-pwrap')),
         ('reg', u64(0x1000d000 - SOC_BASE, 0x1000)),
@@ -400,17 +475,17 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
         # ignore the -wdt_no_pmu boot-arg).
         node('wdt', [ph(), ('no-pmu', u32(1))]),
         # Main display: IOMobileFramebuffer.framework counts /arm-io children
-        # with this device_type and reads the canvas size from the node
-        # (the presented iPhone X size, see SweetFramebuffer.cpp);
-        # the kernel's AppleCLCD matches the compatible string.
+        # with this device_type and reads the canvas size from the node. X670
+        # uses the panel's native 1080x2400 mode; the other SWEET target keeps
+        # the iPhone X 1125x2436 compatibility canvas.
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(FB_W if x670 else 1125)),
+            ('canvas-height', u32(FB_H if x670 else 2436)),
         ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva and not x670 else []) +
-        ([pwrap] if x670 else []))
+        (x670_input_nodes if x670 else []) + ([pwrap] if x670 else []))
 
     fbcon = node('sweet-fbcon', [
         ph(),

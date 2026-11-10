@@ -7,6 +7,7 @@
 #   ufs-ro     UFS node, writes refused (no ufsrw): finds "userdata" and tries to mount it
 #   ufs-rw     iOS root in userdata, read-write; writes stay inside that partition
 #   sd-ro      X670 microSD root, read-only; finds GPT partition "iosroot"
+#   sd-rw      X670 microSD root, read-write; requires the SD CMD24 write path
 # Env: VIVA_CMDLINE replaces the whole command line; VIVA_EXTRA sets single
 # boot-args on top of it (default "cpus=8 vivausb=3 vivagpu=2 vivascanout=1": all
 # eight cores incl. the two A76s, USB link, GPU on, direct scanout of CA's
@@ -18,8 +19,8 @@
 # log): their fixed MMIO addresses are other blocks on MT6781.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-KERNEL=${1:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw|sd-ro]}
-STOCK=${2:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw|sd-ro]}
+KERNEL=${1:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw|sd-ro|sd-rw]}
+STOCK=${2:?usage: viva-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw|sd-ro|sd-rw]}
 STAGE=${3:-ufs-ro}
 # build-viva.sh runs from shim/: hand it absolute paths (Windows Git Bash / MSYS
 # also needs this, and mkpayload runs from the repo root).
@@ -32,17 +33,27 @@ nostorage) ADT_FLAGS=(--viva); CMDLINE="$BASE rd=ufsroot0 ufslun=2 sweetfb_nocon
 ufs-ro) ADT_FLAGS=(--viva --ufs); CMDLINE="$BASE rd=ufsroot0 ufslun=2 sweetfb_noconsole=1" ;;
 ufs-rw) ADT_FLAGS=(--viva --ufs)
 	CMDLINE="$BASE rd=ufsroot0 ufslun=2 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 sweetfb_noconsole=1" ;;
-sd-ro) ADT_FLAGS=(--viva --x670); CMDLINE="$BASE rd=sdroot0 sdroot=iosroot" ;;
+sd-ro) ADT_FLAGS=(--viva --x670)
+	# The SWEET kernel is built with the macOS platform config. Allow Apple's
+	# iOS launchd to pass the kernel's platform check, then let libignition
+	# discover the iOS 16.5 cryptex/shared cache from the SD root.
+	CMDLINE="$BASE rd=sdroot0 sdroot=iosroot unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1" ;;
+sd-rw) ADT_FLAGS=(--viva --x670)
+	# launchd's mount phase remounts / read-write. This requires both the
+	# SWEET rootrw patch and the X670 SD driver's single-sector write path.
+	CMDLINE="$BASE rd=sdroot0 sdroot=iosroot rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1" ;;
 *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
-# VIVA_DEV=x670: Infinix Note 12 G96 (same MT6781, own RAM/FB, no device nubs yet)
-if [ "${VIVA_DEV:-viva}" = x670 ] && [[ ! " ${ADT_FLAGS[*]} " =~ [[:space:]]--x670[[:space:]] ]]; then
-	ADT_FLAGS+=(--x670)
+# X670: use its native panel dimensions and pixel density. Its iOS mode is
+# still scale 3 (360x800 points); the compatible iPhone X canvas is for viva.
+if [ "${VIVA_DEV:-viva}" = x670 ] || [ "$STAGE" = sd-ro ] || [ "$STAGE" = sd-rw ]; then
+	if [[ ! " ${ADT_FLAGS[*]} " =~ [[:space:]]--x670[[:space:]] ]]; then ADT_FLAGS+=(--x670); fi
+	CMDLINE="$CMDLINE sweetfb_native=1"
 fi
 CMDLINE=${VIVA_CMDLINE:-$CMDLINE}
 # VIVA_EXTRA="cpus=6 vivausb=3": set/replace single boot-args (XNU uses the first match)
-if [ "$STAGE" = sd-ro ]; then
-	DEFAULT_EXTRA=cpus=8
+if [ "$STAGE" = sd-ro ] || [ "$STAGE" = sd-rw ]; then
+	DEFAULT_EXTRA='cpus=1 sweetlog=1 sweetlogsecs=1 scorpion=SCORPION_BOOT'
 else
 	DEFAULT_EXTRA='cpus=8 vivausb=3 vivagpu=2 vivascanout=1'
 fi
