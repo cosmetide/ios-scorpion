@@ -47,6 +47,10 @@ esac
 # X670: use its native panel dimensions and pixel density. Its iOS mode is
 # still scale 3 (360x800 points); the compatible iPhone X canvas is for viva.
 if [ "${VIVA_DEV:-viva}" = x670 ] || [ "$STAGE" = sd-ro ] || [ "$STAGE" = sd-rw ]; then
+	# SD stages are X670 builds even when launched from PowerShell/WSL, where
+	# Windows environment variables are not automatically exported to Linux.
+	VIVA_DEV=x670
+	export VIVA_DEV
 	if [[ ! " ${ADT_FLAGS[*]} " =~ [[:space:]]--x670[[:space:]] ]]; then ADT_FLAGS+=(--x670); fi
 	CMDLINE="$CMDLINE sweetfb_native=1"
 fi
