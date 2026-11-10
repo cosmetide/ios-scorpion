@@ -261,7 +261,7 @@ def viva_devices(ph, phandle, gic_ph, ecid):
 
 
 def x670_touch_bus(ph, gic_ph):
-    """Only X670 I2C0 and its GT9896S child; values are from the TWRP DTB."""
+    """X670 I2C0 and the FocalTech controller confirmed from the live Android DTB."""
     io = lambda pa, size: u64(pa - SOC_BASE, size)
     return node('i2c0', [
         ph(),
@@ -277,20 +277,13 @@ def x670_touch_bus(ph, gic_ph):
         ('ext-time-config', u32(0x1801)),
     ], [node('touch', [
         ph(),
-        # TWRP's root touch node only says goodix,touch; X670 vendor firmware
-        # identifies the actual controller as GT9896S at the standard 0x5d.
-        ('compatible', cstr('goodix,gt9896')),
-        ('i2c-address', u32(0x5d)),
-        ('max-x', u32(8640)),
-        ('max-y', u32(18400)),
-        ('reg-coor', u32(0x4180)),
-        ('reg-pid', u32(0x4022)),
-        ('reg-fw-request', u32(0x4180)),
-        # TWRP DTB contains no touch IRQ/reset/rail data. Probe without driving
-        # guessed GPIOs and poll the coordinate register.
-        ('skip-power-sequence', u32(1)),
-        ('polling-ms', u32(50)),
-        ('trace-events', u32(1)),
+        # The live Android DTB names cap_touch@38; rooted dmesg confirms FTS ID 0x54.
+        ('compatible', cstr('focaltech,fts')),
+        ('i2c-address', u32(0x38)),
+        ('max-x', u32(1080)),
+        ('max-y', u32(2400)),
+        # Preserve LK/Android's already-powered controller; use a polled IRQ-safe path.
+        ('polling-ms', u32(10)),
     ])])
 
 

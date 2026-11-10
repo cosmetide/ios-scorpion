@@ -1,0 +1,518 @@
+diff --git a/iokit/Kernel/arm/VivaIO.cpp b/iokit/Kernel/arm/VivaIO.cpp
+--- a/iokit/Kernel/arm/VivaIO.cpp
++++ b/iokit/Kernel/arm/VivaIO.cpp
+@@ -304,7 +304,8 @@
+ IOReturn
+ VivaI2C::transfer(uint8_t addr, const uint8_t *wbuf, uint32_t wlen, uint8_t *rbuf, uint32_t rlen)
+ {
+-	if (addr > 0x7f || wlen == 0 || wlen > kFIFOSize || rlen > kFIFOSize || (rlen && rbuf == NULL)) {
++	if (addr > 0x7f || wlen > kFIFOSize || rlen > kFIFOSize || (wlen == 0 && rlen == 0) ||
++	    (wlen == 0 && rlen != 0 && rbuf == NULL) || (wlen != 0 && rlen != 0 && rbuf == NULL)) {
+ 		return kIOReturnBadArgument;
+ 	}
+ 	return fGate->runActionBlock(^IOReturn {
+@@ -316,7 +317,8 @@
+ IOReturn
+ VivaI2C::transferGated(uint8_t addr, const uint8_t *wbuf, uint32_t wlen, uint8_t *rbuf, uint32_t rlen)
+ {
+-	bool wrrd = rlen != 0;
++	bool wrrd = wlen != 0 && rlen != 0;
++	bool readOnly = wlen == 0 && rlen != 0;
+ 
+ 	wr16(I2C_HW_TIMEOUT, fHWTimeout);
+ 	wr16(I2C_CLOCK_DIV, (uint16_t)(((fClockDiv - 1) << 8) | (fClockDiv - 1)));
+@@ -331,11 +333,11 @@
+ 	wr16(I2C_TIMING, fTiming | TIMING_TIMEOUT_EN);
+ 	wr16(I2C_LTIMING, fLTiming);
+ 	wr16(I2C_HS, 0);
+-	wr16(I2C_SLAVE_ADDR, (uint16_t)(addr << 1));
++	wr16(I2C_SLAVE_ADDR, (uint16_t)((addr << 1) | (readOnly ? 1 : 0)));
+ 	wr16(I2C_INTR_STAT, INTR_ALL);
+ 	wr16(I2C_FIFO_ADDR_CLR, 1);
+ 	wr16(I2C_INTR_MASK, INTR_ERRORS | INTR_TRANSAC_COMP);
+-	wr16(I2C_TRANSFER_LEN, (uint16_t)wlen);
++	wr16(I2C_TRANSFER_LEN, (uint16_t)(readOnly ? rlen : wlen));
+ 	if (wrrd) {
+ 		wr16(I2C_TRANSFER_LEN_AUX, (uint16_t)rlen);
+ 		wr16(I2C_TRANSAC_LEN, 2);
+diff --git a/iokit/Kernel/arm/hid/VivaGT9896.cpp b/iokit/Kernel/arm/hid/VivaGT9896.cpp
+--- a/iokit/Kernel/arm/hid/VivaGT9896.cpp
++++ b/iokit/Kernel/arm/hid/VivaGT9896.cpp
+@@ -1,88 +1,48 @@
+ /*
+- * viva (MT6781): Goodix GT9896 touch controller, the built-in touch screen.
+- * Matches /arm-io/i2c0/touch ("goodix,gt9896"), a child of VivaI2C
+- * (../VivaIO.cpp); it is a SweetHIDTouch, so contacts reach backboardd as
+- * the same digitizer collection events (fingers, edge tips) as on sweet.
+- *
+- * Protocol and power sequence from Xiaomi's driver for this phone
+- * (viva-r-oss drivers/input/touchscreen/goodix_gtx8). This GT9896 is a
+- * "Yellowstone" IC: its register map comes from the vendor's
+- * goodix_cfg_group.bin (ic_type "yellowstone", pid "9896"), copied into the
+- * ADT: coordinates 0x4180, pid 0x4022, fw_request 0x4180 (2026-11-03).
+- *  - power: avdd GPIO high, 100 us, dvdd GPIO high (load switches); reset
+- *    GPIO low 2 ms, high, 110 ms, then the IC answers on I2C
+- *  - registers have 16-bit big-endian addresses
+- *  - interrupt (EINT 13, falling edge) -> 8-byte event head at coor:
+- *    byte 0 bit 7 touch event, bit 6 request; byte 2 low nibble = contacts;
+- *    head checksum: sum of bytes 0-5 == big-endian bytes 6-7. Then 8 bytes
+- *    per contact (id << 4 | type, -, x BE16, y BE16, w BE16) and a BE16
+- *    sum of the contact bytes; write 0 to coor when done
+- *  - coordinates 0..panel-max (8640 x 19200 = 8x the 1080 x 2400 panel)
+- * Reads go in 8-byte pieces (VivaI2C FIFO transfers).
+- *
+- * ADT: i2c-address, avdd-gpio, dvdd-gpio, reset-gpio, max-x, max-y,
+- * reg-coor, reg-pid, reg-fw-request; the interrupt is
+- * interrupts/interrupt-parent (VivaEINT).
++ * X670 FocalTech touchscreen: FTS controller at I2C0 address 0x38.
++ * Rooted Android reports chip ID 0x54 at register 0xa3 and emits ten 6-byte
++ * point records in a 63-byte report beginning at register 0x00.
++ * The MediaTek controller's hardware FIFO is 8 bytes, so each report is read
++ * as one register-pointer write followed by bounded direct-read transactions.
++ * Power and pin state are left as established by the boot firmware.
+  */
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOWorkLoop.h>
+-#include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOTimerEventSource.h>
+ 
+ #include "SweetHIDTouch.h"
+ #include "../VivaIO.h"
+ 
+-#define GT_REG_TEST             0x4100
+-#define GT_EVENT_TOUCH          0x80
+-#define GT_EVENT_REQUEST        0x40
+-#define GT_BYTES_PER_COORD      8
+-#define GT_HEAD_LEN             8       /* Yellowstone IRQ_HEAD_LEN_YS */
+-#define GT_MAX_TOUCH            10
+-#define GT_POINT_STYLUS         0x01
+-#define GT_POINT_STYLUS_HOVER   0x03
+-#define GT_REQUEST_CONFIG       0x01
+-#define GT_REQUEST_RESET        0x03
+-#define PANEL_W                 1080
+-#define PANEL_H                 2400
++#define FTS_ADDR       0x38
++#define FTS_CHIP_ID    0x54
++#define FTS_REPORT_LEN 63
++#define FTS_POINTS     10
++#define PANEL_W        1080
++#define PANEL_H        2400
+ 
+-class VivaGT9896 : public SweetHIDTouch {
+-	OSDeclareDefaultStructors(VivaGT9896);
+-
++class VivaFTS : public SweetHIDTouch {
++	OSDeclareDefaultStructors(VivaFTS);
+ public:
+ 	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	virtual void free(void) APPLE_KEXT_OVERRIDE;
+ 	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
+-
+ protected:
+-	virtual OSString *getProduct() APPLE_KEXT_OVERRIDE { return OSString::withCString("GT9896"); }
+-	virtual UInt32 getVendorID() APPLE_KEXT_OVERRIDE { return 0x27c6; }        /* Goodix */
+-	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x9896; }
+-
++	virtual OSString *getProduct() APPLE_KEXT_OVERRIDE { return OSString::withCString("FocalTech FTS"); }
++	virtual UInt32 getVendorID() APPLE_KEXT_OVERRIDE { return 0x2808; }
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return FTS_CHIP_ID; }
+ private:
+-	static void interruptOccurred(OSObject *owner, IOInterruptEventSource *src, int count);
+ 	static void pollFired(OSObject *owner, IOTimerEventSource *src);
+-	IOReturn readReg(uint16_t reg, uint8_t *buf, uint32_t len);
+-	IOReturn writeReg(uint16_t reg, const uint8_t *buf, uint32_t len);
+-	bool powerOn(void);
++	IOReturn readReg(uint8_t reg, uint8_t *buf, uint32_t len);
+ 	void handleEvent(void);
+-	void handleRequest(void);
+-
+-	VivaI2C                *fBus;
+-	VivaGPIO               *fGPIO;
+-	IOWorkLoop             *fWorkLoop;
+-	IOInterruptEventSource *fInterrupt;
+-	IOTimerEventSource     *fPoll;
+-	uint8_t                 fAddr;
+-	uint32_t                fAvdd, fDvdd, fReset, fMaxX, fMaxY, fPollMs;
+-	uint16_t                fRegCoor, fRegPid, fRegRequest;
+-	uint32_t                fHeadErrors, fPollErrors, fTraceEvents;
+-	uint32_t                fPrevMap;
+-	uint32_t                fEvents, fBadSums;
+-	bool                    fSkipPowerSequence, fTrace;
++	VivaI2C *fBus;
++	IOWorkLoop *fWorkLoop;
++	IOTimerEventSource *fPoll;
++	uint32_t fPollMs, fMaxX, fMaxY, fPrevious;
++	uint32_t fReadErrors;
+ };
+ 
+-OSDefineMetaClassAndStructors(VivaGT9896, SweetHIDTouch);
++OSDefineMetaClassAndStructors(VivaFTS, SweetHIDTouch);
+ 
+ static uint32_t
+ dtU32(IOService *provider, const char *key, uint32_t dflt)
+@@ -92,286 +52,120 @@
+ }
+ 
+ IOWorkLoop *
+-VivaGT9896::getWorkLoop(void) const
++VivaFTS::getWorkLoop(void) const
+ {
+ 	return fWorkLoop;
+ }
+ 
++/* FocalTech uses an 8-bit register pointer, then streams data on I2C reads. */
+ IOReturn
+-VivaGT9896::readReg(uint16_t reg, uint8_t *buf, uint32_t len)
++VivaFTS::readReg(uint8_t reg, uint8_t *buf, uint32_t len)
+ {
+-	while (len > 0) {
++	IOReturn ret = fBus->transfer(FTS_ADDR, &reg, 1, NULL, 0);
++	while (ret == kIOReturnSuccess && len != 0) {
+ 		uint32_t n = len < (uint32_t)VivaI2C::kFIFOSize ? len : (uint32_t)VivaI2C::kFIFOSize;
+-		uint8_t a[2] = { (uint8_t)(reg >> 8), (uint8_t)reg };
+-		IOReturn ret = fBus->transfer(fAddr, a, 2, buf, n);
+-		if (ret != kIOReturnSuccess) {
+-			return ret;
+-		}
+-		reg += n;
++		ret = fBus->transfer(FTS_ADDR, NULL, 0, buf, n);
+ 		buf += n;
+ 		len -= n;
+ 	}
+-	return kIOReturnSuccess;
+-}
+-
+-IOReturn
+-VivaGT9896::writeReg(uint16_t reg, const uint8_t *buf, uint32_t len)
+-{
+-	uint8_t w[VivaI2C::kFIFOSize] = { (uint8_t)(reg >> 8), (uint8_t)reg };
+-	if (len > VivaI2C::kFIFOSize - 2) {
+-		return kIOReturnBadArgument;
+-	}
+-	memcpy(w + 2, buf, len);
+-	return fBus->transfer(fAddr, w, 2 + len, NULL, 0);
+-}
+-
+-/* goodix_ts_power_on + goodix_ts_dev_confirm */
+-bool
+-VivaGT9896::powerOn(void)
+-{
+-	fGPIO->setOutput(fReset, false);
+-	fGPIO->setOutput(fAvdd, true);
+-	IODelay(100);
+-	fGPIO->setOutput(fDvdd, true);
+-	IOSleep(10);
+-	for (int retry = 0; retry < 3; retry++) {
+-		fGPIO->setOutput(fReset, false);
+-		IODelay(2000);
+-		fGPIO->setOutput(fReset, true);
+-		IOSleep(110);
+-		uint8_t test = 0;
+-		if (readReg(GT_REG_TEST, &test, 1) == kIOReturnSuccess) {
+-			IOSleep(95);
+-			return true;
+-		}
+-	}
+-	return false;
++	return ret;
+ }
+ 
+ bool
+-VivaGT9896::start(IOService *provider)
++VivaFTS::start(IOService *provider)
+ {
+ 	fBus = OSDynamicCast(VivaI2C, provider->getProvider());
+-	fSkipPowerSequence = dtU32(provider, "skip-power-sequence", 0) != 0;
+-	fTrace = dtU32(provider, "trace-events", 0) != 0;
+-	fPollMs = dtU32(provider, "polling-ms", 0);
+-	fGPIO = fSkipPowerSequence ? NULL : VivaGPIO::wait();
+ 	fWorkLoop = IOWorkLoop::workLoop();
+-	fAddr = (uint8_t)dtU32(provider, "i2c-address", 0x5d);
+-	fAvdd = dtU32(provider, "avdd-gpio", 166);
+-	fDvdd = dtU32(provider, "dvdd-gpio", 73);
+-	fReset = dtU32(provider, "reset-gpio", 17);
+-	fMaxX = dtU32(provider, "max-x", 8640);
+-	fMaxY = dtU32(provider, "max-y", 19200);
+-	fRegCoor = (uint16_t)dtU32(provider, "reg-coor", 0x4180);
+-	fRegPid = (uint16_t)dtU32(provider, "reg-pid", 0x4022);
+-	fRegRequest = (uint16_t)dtU32(provider, "reg-fw-request", 0x4180);
+-	if (fBus == NULL || (!fSkipPowerSequence && fGPIO == NULL) || fWorkLoop == NULL) {
+-		IOLog("VIVA TOUCH: missing I2C bus, required GPIO or work loop\n");
++	fPoll = NULL;
++	fPrevious = 0;
++	fReadErrors = 0;
++	fPollMs = dtU32(provider, "polling-ms", 10);
++	fMaxX = dtU32(provider, "max-x", PANEL_W);
++	fMaxY = dtU32(provider, "max-y", PANEL_H);
++	if (fBus == NULL || fWorkLoop == NULL || fPollMs < 5 || fPollMs > 100 ||
++	    fMaxX == 0 || fMaxY == 0) {
++		IOLog("X670 FTS: invalid I2C, poll interval or panel dimensions\n");
+ 		return false;
+ 	}
+-	if (fSkipPowerSequence) {
+-		IOLog("X670 TOUCH TEST: passive probe at I2C 0x%02x, no reset/rail writes, poll %u ms\n",
+-		    fAddr, fPollMs);
+-	} else if (!powerOn()) {
+-		IOLog("VIVA TOUCH: GT9896 at 0x%02x does not answer after reset\n", fAddr);
++	uint8_t id = 0;
++	IOReturn probe = readReg(0xa3, &id, 1);
++	IOLog("X670 FTS: I2C 0x38 ID %s (%d), 0x%02x; panel %ux%u\n",
++	    probe == kIOReturnSuccess ? "read" : "read failed", probe, id, fMaxX, fMaxY);
++	if (probe != kIOReturnSuccess || id != FTS_CHIP_ID) {
+ 		return false;
+ 	}
+-	uint8_t pid[5] = { 0 };
+-	IOReturn probe = readReg(fRegPid, pid, sizeof(pid));
+-	IOLog("%s: I2C 0x%02x PID read %s (%d), bytes %02x %02x %02x %02x %02x ('%c%c%c%c%c'), coor 0x%04x\n",
+-	    fSkipPowerSequence ? "X670 TOUCH TEST" : "VIVA TOUCH", fAddr,
+-	    probe == kIOReturnSuccess ? "ok" : "failed", probe,
+-	    pid[0], pid[1], pid[2], pid[3], pid[4],
+-	    pid[0] >= 0x20 && pid[0] < 0x7f ? pid[0] : '.',
+-	    pid[1] >= 0x20 && pid[1] < 0x7f ? pid[1] : '.',
+-	    pid[2] >= 0x20 && pid[2] < 0x7f ? pid[2] : '.',
+-	    pid[3] >= 0x20 && pid[3] < 0x7f ? pid[3] : '.',
+-	    pid[4] >= 0x20 && pid[4] < 0x7f ? pid[4] : '.', fRegCoor);
+-	if (!fSkipPowerSequence) {
+-		uint8_t zero = 0;
+-		writeReg(fRegCoor, &zero, 1);
+-	}
+-
+-	/* HID service (SweetHIDTouch publishes the digitizer properties) */
+ 	if (!SweetHIDTouch::start(provider)) {
+ 		return false;
+ 	}
+-	if (fPollMs != 0) {
+-		fPoll = IOTimerEventSource::timerEventSource(this, &VivaGT9896::pollFired);
+-		if (fPoll == NULL || fWorkLoop->addEventSource(fPoll) != kIOReturnSuccess) {
+-			IOLog("X670 TOUCH TEST: cannot create polling timer\n");
+-			return false;
+-		}
+-		fPoll->setTimeoutMS(fPollMs);
+-	} else {
+-		fInterrupt = IOInterruptEventSource::interruptEventSource(this, &VivaGT9896::interruptOccurred, provider, 0);
+-		if (fInterrupt == NULL || fWorkLoop->addEventSource(fInterrupt) != kIOReturnSuccess) {
+-			IOLog("VIVA TOUCH: no interrupt\n");
+-			return false;
+-		}
+-		fInterrupt->enable();
++	fPoll = IOTimerEventSource::timerEventSource(this, &VivaFTS::pollFired);
++	if (fPoll == NULL || fWorkLoop->addEventSource(fPoll) != kIOReturnSuccess) {
++		IOLog("X670 FTS: cannot start polling timer\n");
++		return false;
+ 	}
+-	IOLog("%s: GT9896 at 0x%02x %s, %ux%u\n",
+-	    fSkipPowerSequence ? "X670 TOUCH TEST" : "VIVA TOUCH", fAddr,
+-	    fPollMs ? "polling" : "interrupt mode", fMaxX, fMaxY);
++	fPoll->setTimeoutMS(fPollMs);
++	IOLog("X670 FTS: touch reports enabled, polling every %u ms\n", fPollMs);
+ 	return true;
+ }
+ 
+ void
+-VivaGT9896::free(void)
++VivaFTS::free(void)
+ {
+-	if (fInterrupt != NULL) {
+-		fInterrupt->disable();
+-		if (fWorkLoop != NULL) {
+-			fWorkLoop->removeEventSource(fInterrupt);
+-		}
+-	}
+ 	if (fPoll != NULL) {
+ 		fPoll->cancelTimeout();
+-		if (fWorkLoop != NULL) {
+-			fWorkLoop->removeEventSource(fPoll);
+-		}
++		if (fWorkLoop != NULL) fWorkLoop->removeEventSource(fPoll);
+ 	}
+-	OSSafeReleaseNULL(fInterrupt);
+ 	OSSafeReleaseNULL(fPoll);
+ 	SweetHIDTouch::free();
+ 	OSSafeReleaseNULL(fWorkLoop);
+ }
+ 
+ void
+-VivaGT9896::pollFired(OSObject *owner, IOTimerEventSource *src)
++VivaFTS::pollFired(OSObject *owner, IOTimerEventSource *src)
+ {
+-	VivaGT9896 *self = OSDynamicCast(VivaGT9896, owner);
++	VivaFTS *self = OSDynamicCast(VivaFTS, owner);
+ 	if (self != NULL) {
+ 		self->handleEvent();
+ 		src->setTimeoutMS(self->fPollMs);
+ 	}
+ }
+ 
++/* FT5x06 report: header, then ten 6-byte records (event, X, ID/Y, ...). */
+ void
+-VivaGT9896::interruptOccurred(OSObject *owner, IOInterruptEventSource *src __unused, int count __unused)
++VivaFTS::handleEvent(void)
+ {
+-	VivaGT9896 *self = OSDynamicCast(VivaGT9896, owner);
+-	if (self != NULL) {
+-		self->handleEvent();
+-	}
+-}
+-
+-/* goodix_request_handler: the IC asks for something. */
+-void
+-VivaGT9896::handleRequest(void)
+-{
+-	uint8_t req = 0, zero = 0;
+-	readReg(fRegRequest, &req, 1);
+-	IOLog("VIVA TOUCH: request 0x%02x%s\n", req,
+-	    req == GT_REQUEST_CONFIG ? " (config: not sent, the IC keeps its flash config)" :
+-	    req == GT_REQUEST_RESET ? " (reset)" : "");
+-	if (req == GT_REQUEST_RESET) {
+-		if (fGPIO != NULL) {
+-			fGPIO->setOutput(fReset, false);
+-			IODelay(2000);
+-			fGPIO->setOutput(fReset, true);
+-			IOSleep(100);
+-		} else {
+-			IOLog("X670 TOUCH TEST: controller requested reset; skipped in passive mode\n");
+-		}
+-	}
+-	writeReg(fRegRequest, &zero, 1);
+-}
+-
+-static inline uint16_t
+-be16(const uint8_t *p)
+-{
+-	return (uint16_t)(p[0] << 8 | p[1]);
+-}
+-
+-/* checksum_u8_ys: the byte sum of all but the last 2 bytes equals them (big endian). */
+-static bool
+-sumOK(const uint8_t *p, uint32_t len)
+-{
+-	uint16_t sum = 0;
+-	for (uint32_t i = 0; i < len - 2; i++) {
+-		sum += p[i];
+-	}
+-	return sum == be16(p + len - 2);
+-}
+-
+-/* Work loop: goodix_event_handler + goodix_touch_handler_ys. */
+-void
+-VivaGT9896::handleEvent(void)
+-{
+-	uint8_t buf[GT_HEAD_LEN + GT_BYTES_PER_COORD * GT_MAX_TOUCH + 2];
+-	uint32_t pre = GT_HEAD_LEN + GT_BYTES_PER_COORD + 2;
+-	uint8_t zero = 0;
+-
+-	if (readReg(fRegCoor, buf, pre) != kIOReturnSuccess) {
+-		if (fSkipPowerSequence && ++fPollErrors <= 8) {
+-			IOLog("X670 TOUCH TEST: coordinate read failed (%u/8)\n", fPollErrors);
+-		}
++	uint8_t buf[FTS_REPORT_LEN] = { 0 };
++	if (readReg(0x00, buf, sizeof(buf)) != kIOReturnSuccess) {
++		if (++fReadErrors <= 8) IOLog("X670 FTS: report read failed (%u/8)\n", fReadErrors);
+ 		return;
+ 	}
+-	fPollErrors = 0;
+-	if (!sumOK(buf, GT_HEAD_LEN)) {
+-		if (++fHeadErrors <= 8) {
+-			IOLog("VIVA TOUCH: head checksum %02x %02x %02x %02x %02x %02x %02x %02x\n",
+-			    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+-		}
+-		if (fHeadErrors % 2 == 0) {
+-			writeReg(fRegCoor, &zero, 1);
+-		}
+-		return;
++	fReadErrors = 0;
++	uint32_t expected = buf[2] & 0x0f;
++	if ((buf[0] & 0x70) != 0 || expected > FTS_POINTS) return;
++	uint32_t seen = 0, active = 0, activeCount = 0;
++	int x[FTS_POINTS] = { 0 }, y[FTS_POINTS] = { 0 };
++	for (uint32_t i = 0; i < FTS_POINTS; ++i) {
++		const uint8_t *p = buf + 3 + i * 6;
++		uint32_t id = p[2] >> 4, event = p[0] >> 6;
++		if (id >= FTS_POINTS) break;
++		if (seen & (1u << id)) return;
++		seen |= 1u << id;
++		if (event == 1) continue; /* contact lifted */
++		if (event == 3) return;   /* reserved event encoding */
++		uint32_t px = ((p[0] & 0x0f) << 8) | p[1];
++		uint32_t py = ((p[2] & 0x0f) << 8) | p[3];
++		if (px >= fMaxX || py >= fMaxY) return;
++		active |= 1u << id;
++		x[id] = (int)px;
++		y[id] = (int)py;
++		++activeCount;
+ 	}
+-	if (!(buf[0] & GT_EVENT_TOUCH)) {
+-		if (buf[0] & GT_EVENT_REQUEST) {
+-			handleRequest();
+-		}
+-		writeReg(fRegCoor, &zero, 1);
+-		return;
+-	}
+-	uint32_t n = buf[2] & 0x0f;
+-	if (n > GT_MAX_TOUCH) {
+-		writeReg(fRegCoor, &zero, 1);
+-		return;
+-	}
+-	if (n > 1 && readReg(fRegCoor + pre, buf + pre, (n - 1) * GT_BYTES_PER_COORD) != kIOReturnSuccess) {
+-		return;
+-	}
+-	writeReg(fRegCoor, &zero, 1);
+-
+-	if (n > 0 && !sumOK(buf + GT_HEAD_LEN, n * GT_BYTES_PER_COORD + 2)) {
+-		if (++fBadSums <= 8) {
+-			IOLog("VIVA TOUCH: contact checksum (n %u)\n", n);
+-		}
+-		return;
+-	}
+-	if (n > 0) {
+-		uint8_t type = buf[GT_HEAD_LEN + (n - 1) * GT_BYTES_PER_COORD] & 0x0f;
+-		if (type == GT_POINT_STYLUS || type == GT_POINT_STYLUS_HOVER) {
+-			return;         /* pen report: not a finger */
+-		}
+-	}
+-
+-	fEvents++;
+-	uint32_t map = 0;
+-	const uint8_t *c = buf + GT_HEAD_LEN;
+-	for (uint32_t i = 0; i < n; i++, c += GT_BYTES_PER_COORD) {
+-		uint32_t id = (c[0] >> 4) & 0x0f;
+-		if (id >= GT_MAX_TOUCH || id >= SWEET_TOUCH_FINGERS) {
+-			break;
+-		}
+-		uint32_t x = be16(c + 2), y = be16(c + 4);
+-		map |= 1u << id;
+-		if (fTrace && fTraceEvents < 24) {
+-			IOLog("X670 TOUCH TEST: contact %u/%u x=%u y=%u\n", id, n, x, y);
+-			fTraceEvents++;
+-		}
+-		touch((int)id, true, (int)(x * PANEL_W / fMaxX), (int)(y * PANEL_H / fMaxY));
+-	}
+-	for (uint32_t id = 0; id < SWEET_TOUCH_FINGERS; id++) {
+-		if ((fPrevMap & (1u << id)) && !(map & (1u << id))) {
++	if (activeCount != expected) return;
++	for (uint32_t id = 0; id < SWEET_TOUCH_FINGERS; ++id) {
++		if (active & (1u << id)) {
++			touch((int)id, true, x[id], y[id]);
++		} else if (fPrevious & (1u << id)) {
+ 			touch((int)id, false, 0, 0);
+ 		}
+ 	}
+-	fPrevMap = map;
++	fPrevious = active;
+ }
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -113,9 +113,9 @@
+     "     'IONameMatch'     = 'mediatek,mt6781-i2c';"
+     "   },"
+     "   {"
+-    "     'IOClass'         = VivaGT9896;"
++    "     'IOClass'         = VivaFTS;"
+     "     'IOProviderClass' = VivaDTNub;"
+-    "     'IONameMatch'     = 'goodix,gt9896';"
++    "     'IONameMatch'     = 'focaltech,fts';"
+     "   },"
+     "   {"
+     "     'IOClass'         = VivaGPUAccelerator;"
