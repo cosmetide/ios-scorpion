@@ -1,0 +1,42 @@
+diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+--- a/bsd/dev/sweet_sd.c
++++ b/bsd/dev/sweet_sd.c
+@@ -462,6 +462,10 @@
+ 	case DKIOCGETPHYSICALBLOCKSIZE: *f = SD_SECTOR; return 0;
+ 	case DKIOCGETBLOCKCOUNT: *o = sd.count * SD_SECTOR / DEV_BSIZE; return 0;
+ 	case DKIOCISWRITABLE: *f = 1; return 0;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE:
++		/* CMD24 waits for the card to finish programming before it returns. */
++		return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTREAD: *o = 128; return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTWRITE: *o = 1; return 0;
+ 	case DKIOCGETMAXSEGMENTCOUNTREAD:
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -113,6 +113,7 @@
+ 	uint64_t      fPhys;
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
++	uint32_t      fDotPitch;
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+@@ -178,6 +179,7 @@
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	fDotPitch = native ? 393 : SWEET_FB_DOT_PITCH;
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+ 	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+@@ -597,7 +599,7 @@
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBGetDotPitch:
+-		out[0] = SWEET_FB_DOT_PITCH;
++		out[0] = fFB->fDotPitch;
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBNotifications:
