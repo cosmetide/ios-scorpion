@@ -1,0 +1,122 @@
+--- a/iokit/Kernel/arm/hid/VivaGT9896.cpp
++++ b/iokit/Kernel/arm/hid/VivaGT9896.cpp
+@@ -2,9 +2,9 @@
+  * X670 FocalTech touchscreen: FTS controller at I2C0 address 0x38.
+  * Rooted Android reports chip ID 0x54 at register 0xa3 and emits ten 6-byte
+  * point records in a 63-byte report beginning at register 0x00.
+- * The MediaTek controller's hardware FIFO is 8 bytes, so each report is read
+- * as one register-pointer write followed by bounded direct-read transactions.
+- * Power and pin state are left as established by the boot firmware.
++ * The MediaTek controller's hardware FIFO is 8 bytes. Register reads use a
++ * combined write/repeated-start/read transaction. Android's live DT provides
++ * reset GPIO16 and VDD GPIO169; pulse these before probing, as Android does.
+  */
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOService.h>
+@@ -34,12 +34,14 @@
+ private:
+ 	static void pollFired(OSObject *owner, IOTimerEventSource *src);
+ 	IOReturn readReg(uint8_t reg, uint8_t *buf, uint32_t len);
++	bool powerOn(void);
+ 	void handleEvent(void);
+ 	VivaI2C *fBus;
++	VivaGPIO *fGPIO;
+ 	IOWorkLoop *fWorkLoop;
+ 	IOTimerEventSource *fPoll;
+-	uint32_t fPollMs, fMaxX, fMaxY, fPrevious;
+-	uint32_t fReadErrors;
++	uint32_t fPollMs, fMaxX, fMaxY, fPrevious, fResetPin, fVddPin;
++	uint32_t fReadErrors, fTraceEvents;
+ };
+ 
+ OSDefineMetaClassAndStructors(VivaFTS, SweetHIDTouch);
+@@ -57,36 +59,65 @@
+ 	return fWorkLoop;
+ }
+ 
+-/* FocalTech uses an 8-bit register pointer, then streams data on I2C reads. */
++/* Keep each register-pointer write and read together with a repeated start. */
+ IOReturn
+ VivaFTS::readReg(uint8_t reg, uint8_t *buf, uint32_t len)
+ {
+-	IOReturn ret = fBus->transfer(FTS_ADDR, &reg, 1, NULL, 0);
+-	while (ret == kIOReturnSuccess && len != 0) {
++	IOReturn ret = kIOReturnSuccess;
++	while (len != 0) {
+ 		uint32_t n = len < (uint32_t)VivaI2C::kFIFOSize ? len : (uint32_t)VivaI2C::kFIFOSize;
+-		ret = fBus->transfer(FTS_ADDR, NULL, 0, buf, n);
++		ret = fBus->transfer(FTS_ADDR, &reg, 1, buf, n);
++		if (ret != kIOReturnSuccess) return ret;
++		reg += (uint8_t)n;
+ 		buf += n;
+ 		len -= n;
+ 	}
+-	return ret;
++	return kIOReturnSuccess;
++}
++
++bool
++VivaFTS::powerOn(void)
++{
++	if (fGPIO->setOutput(fVddPin, true) != kIOReturnSuccess) {
++		IOLog("X670 FTS: could not enable touch VDD GPIO%u\n", fVddPin);
++		return false;
++	}
++	IOSleep(10);
++	if (fGPIO->setOutput(fResetPin, false) != kIOReturnSuccess) {
++		IOLog("X670 FTS: could not assert reset GPIO%u\n", fResetPin);
++		return false;
++	}
++	IOSleep(20);
++	if (fGPIO->setOutput(fResetPin, true) != kIOReturnSuccess) {
++		IOLog("X670 FTS: could not release reset GPIO%u\n", fResetPin);
++		return false;
++	}
++	IOSleep(210); /* Android logs TP Ready about 210 ms after reset release. */
++	IOLog("X670 FTS: VDD GPIO%u on, reset GPIO%u pulsed\n", fVddPin, fResetPin);
++	return true;
+ }
+ 
+ bool
+ VivaFTS::start(IOService *provider)
+ {
+ 	fBus = OSDynamicCast(VivaI2C, provider->getProvider());
++	fGPIO = VivaGPIO::wait();
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	fPoll = NULL;
+ 	fPrevious = 0;
+ 	fReadErrors = 0;
++	fTraceEvents = 0;
+ 	fPollMs = dtU32(provider, "polling-ms", 10);
++	fResetPin = dtU32(provider, "reset-gpio", 16);
++	fVddPin = dtU32(provider, "vdd-gpio", 169);
+ 	fMaxX = dtU32(provider, "max-x", PANEL_W);
+ 	fMaxY = dtU32(provider, "max-y", PANEL_H);
+-	if (fBus == NULL || fWorkLoop == NULL || fPollMs < 5 || fPollMs > 100 ||
++	if (fBus == NULL || fGPIO == NULL || fWorkLoop == NULL || fPollMs < 5 || fPollMs > 100 ||
+ 	    fMaxX == 0 || fMaxY == 0) {
+-		IOLog("X670 FTS: invalid I2C, poll interval or panel dimensions\n");
++		IOLog("X670 FTS: missing I2C/GPIO or invalid poll interval/panel dimensions\n");
+ 		return false;
+ 	}
++	if (!powerOn()) return false;
+ 	uint8_t id = 0;
+ 	IOReturn probe = readReg(0xa3, &id, 1);
+ 	IOLog("X670 FTS: I2C 0x38 ID %s (%d), 0x%02x; panel %ux%u\n",
+@@ -163,8 +194,16 @@
+ 	for (uint32_t id = 0; id < SWEET_TOUCH_FINGERS; ++id) {
+ 		if (active & (1u << id)) {
+ 			touch((int)id, true, x[id], y[id]);
++			if (fTraceEvents < 24) {
++				IOLog("X670 FTS: contact %u down %d,%d\n", id, x[id], y[id]);
++				fTraceEvents++;
++			}
+ 		} else if (fPrevious & (1u << id)) {
+ 			touch((int)id, false, 0, 0);
++			if (fTraceEvents < 24) {
++				IOLog("X670 FTS: contact %u up\n", id);
++				fTraceEvents++;
++			}
+ 		}
+ 	}
+ 	fPrevious = active;

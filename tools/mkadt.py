@@ -280,11 +280,43 @@ def x670_touch_bus(ph, gic_ph):
         # The live Android DTB names cap_touch@38; rooted dmesg confirms FTS ID 0x54.
         ('compatible', cstr('focaltech,fts')),
         ('i2c-address', u32(0x38)),
+        # Android's live DT pinctrl states identify reset GPIO16 and touch VDD GPIO169.
+        ('reset-gpio', u32(16)),
+        ('vdd-gpio', u32(169)),
         ('max-x', u32(1080)),
         ('max-y', u32(2400)),
-        # Preserve LK/Android's already-powered controller; use a polled IRQ-safe path.
+        # Polling avoids depending on the unverified EINT trigger polarity.
         ('polling-ms', u32(10)),
     ])])
+
+
+def x670_keypad(ph, gic_ph):
+    """X670 MT6781 keypad, using the live Android keymap and KPD interrupt."""
+    io = lambda pa, size: u64(pa - SOC_BASE, size)
+    return node('keypad', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-keypad')),
+        ('reg', io(0x10010000, 0x1000)),
+        # kp@10010000 uses GIC SPI 73, edge rising, in the stock DTB.
+        ('interrupt-parent', u32(gic_ph)),
+        ('interrupts', spi(0x49, IRQ_EDGE_RISING)),
+        # kpd-hw-init-map[0..1] = Linux KEY_VOLUMEUP/KEY_VOLUMEDOWN;
+        # kpd-hw-pwrkey = 8. VivaKeypad reports HID consumer-control usages.
+        ('keymap', u32(0, HID_CSMR_VOLUME_UP,
+                       1, HID_CSMR_VOLUME_DOWN,
+                       8, HID_CSMR_POWER)),
+    ])
+
+
+def x670_gpio(ph):
+    """Expose only the touch reset and VDD GPIOs used by Android's pinctrl."""
+    io = lambda pa, size: u64(pa - SOC_BASE, size)
+    return node('gpio', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-gpio')),
+        ('reg', io(0x10005000, 0x1000)),
+        ('output-pins', u32(16, 169)),
+    ])
 
 
 def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670=False):
@@ -415,6 +447,8 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
     ])
 
     x670_touch = x670_touch_bus(ph, gic_ph) if x670 else None
+    x670_keys = x670_keypad(ph, gic_ph) if x670 else None
+    x670_gpio_node = x670_gpio(ph) if x670 else None
     arm_io = node('arm-io', [
         ph(),
         ('device_type', cstr('sweet-io')),
@@ -438,7 +472,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
             ('canvas-width', u32(FB_W if x670 else 1125)),
             ('canvas-height', u32(FB_H if x670 else 2436)),
         ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva and not x670 else []) +
-        ([x670_touch, pwrap] if x670 else []))
+        ([x670_gpio_node, x670_keys, pwrap, x670_touch] if x670 else []))
 
     fbcon = node('sweet-fbcon', [
         ph(),
