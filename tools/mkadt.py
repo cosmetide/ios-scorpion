@@ -260,6 +260,40 @@ def viva_devices(ph, phandle, gic_ph, ecid):
     ]
 
 
+def x670_touch_bus(ph, gic_ph):
+    """Only X670 I2C0 and its GT9896S child; values are from the TWRP DTB."""
+    io = lambda pa, size: u64(pa - SOC_BASE, size)
+    return node('i2c0', [
+        ph(),
+        # XNU's VivaI2C matcher name; TWRP labels this controller mediatek,i2c.
+        ('compatible', cstr('mediatek,mt6781-i2c')),
+        ('reg', io(0x11007000, 0x1000)),
+        ('interrupt-parent', u32(gic_ph)),
+        # TWRP i2c0@11007000 IRQ <0 0x69 4> (GIC SPI 105, level high).
+        ('interrupts', spi(0x69, IRQ_LEVEL_HIGH)),
+        ('clock-frequency', u32(400000)),
+        ('source-clock', u32(124800000)),
+        ('clock-div', u32(5)),
+        ('ext-time-config', u32(0x1801)),
+    ], [node('touch', [
+        ph(),
+        # TWRP's root touch node only says goodix,touch; X670 vendor firmware
+        # identifies the actual controller as GT9896S at the standard 0x5d.
+        ('compatible', cstr('goodix,gt9896')),
+        ('i2c-address', u32(0x5d)),
+        ('max-x', u32(8640)),
+        ('max-y', u32(18400)),
+        ('reg-coor', u32(0x4180)),
+        ('reg-pid', u32(0x4022)),
+        ('reg-fw-request', u32(0x4180)),
+        # TWRP DTB contains no touch IRQ/reset/rail data. Probe without driving
+        # guessed GPIOs and poll the coordinate register.
+        ('skip-power-sequence', u32(1)),
+        ('polling-ms', u32(50)),
+        ('trace-events', u32(1)),
+    ])])
+
+
 def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     viva=True: Redmi Note 11 Pro 4G addresses. Without viva_ufs there is no UFS node, so the
@@ -387,6 +421,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
         ('reg', u64(0x1000d000 - SOC_BASE, 0x1000)),
     ])
 
+    x670_touch = x670_touch_bus(ph, gic_ph) if x670 else None
     arm_io = node('arm-io', [
         ph(),
         ('device_type', cstr('sweet-io')),
@@ -410,7 +445,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
             ('canvas-width', u32(FB_W if x670 else 1125)),
             ('canvas-height', u32(FB_H if x670 else 2436)),
         ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva and not x670 else []) +
-        ([pwrap] if x670 else []))
+        ([x670_touch, pwrap] if x670 else []))
 
     fbcon = node('sweet-fbcon', [
         ph(),

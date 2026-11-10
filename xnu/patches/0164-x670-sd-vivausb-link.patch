@@ -1,0 +1,24 @@
+diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+--- a/bsd/dev/sweet_sd.c
++++ b/bsd/dev/sweet_sd.c
+@@ -26,6 +26,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern int viva_pwrap_write_regulator(uint32_t, uint32_t, uint32_t);
++extern void viva_usb_probe(void);
+ 
+ #define R_CFG       0x000
+ #define R_IOCON     0x004
+@@ -546,6 +547,12 @@
+ int
+ sweet_sd_rootdev(dev_t *dev)
+ {
++	static bool viva_usb_started;
++	if (!viva_usb_started) {
++		/* Optional MT6781 MUSB link; vivausb=0 keeps SD logging as the default. */
++		viva_usb_started = true;
++		viva_usb_probe();
++	}
+ 	if (!sd.ready) {
+ 		int e = sweet_sd_init();
+ 		if (e) return e;

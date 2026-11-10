@@ -54,6 +54,9 @@ CMDLINE=${VIVA_CMDLINE:-$CMDLINE}
 # VIVA_EXTRA="cpus=6 vivausb=3": set/replace single boot-args (XNU uses the first match)
 if [ "$STAGE" = sd-ro ] || [ "$STAGE" = sd-rw ]; then
 	DEFAULT_EXTRA='cpus=1 sweetlog=1 sweetlogsecs=1 scorpion=SCORPION_BOOT'
+	# The X670 TWRP DTB confirms the MT6781 MUSB/T-PHY wiring used by the
+	# existing viva USB link. Keep it opt-in while SD logging remains default.
+	if [ "${VIVA_USB:-0}" = 1 ]; then DEFAULT_EXTRA="$DEFAULT_EXTRA vivausb=3"; fi
 else
 	DEFAULT_EXTRA='cpus=8 vivausb=3 vivagpu=2 vivascanout=1'
 fi
