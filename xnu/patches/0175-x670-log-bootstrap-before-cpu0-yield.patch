@@ -1,0 +1,10 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1108,6 +1108,7 @@
+ 	/* Run the bootstrap launchd exec on the boot CPU during X670 SMP bring-up. */
+ 	processor_t previous_binding = thread_bind(cpu_to_processor(0));
++	printf("SWEET SMP: bsdinit yielding for cpu0; current cpu=%d\n", cpu_number());
+ 	thread_block(THREAD_CONTINUE_NULL);
+ 	if (cpu_number() != 0) {
+ 		panic("SWEET SMP: bsdinit binding resumed on cpu=%d", cpu_number());
