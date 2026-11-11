@@ -1,0 +1,44 @@
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -917,12 +917,19 @@
+ 		first_thread->machine.CpuDatap = cpu_data_ptr;
+ 		first_thread->machine.pcpu_data_base =
+ 		    (vm_address_t)cpu_data_ptr - __PERCPU_ADDR(cpu_data);
++#if defined(SWEET)
++		kprintf("SWEET SMP START: cpu=%d thread state ready\n", cpu);
++#endif
+ 
+ 		configure_coresight_registers(cpu_data_ptr);
++#if defined(SWEET)
++		kprintf("SWEET SMP START: cpu=%d coresight ready\n", cpu);
++#endif
+ 
+ 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
+ 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
+ #if defined(SWEET)
++		kprintf("SWEET SMP START: cpu=%d local cache flush done\n", cpu);
+ 		/* The reset stub loads these through physical addresses with caches off.
+ 		 * Use VA range cleans to PoC, including on coherent-I/O builds. */
+ 		extern uint8_t bootstrap_pagetables[BOOTSTRAP_TABLE_SIZE];
+@@ -944,6 +951,7 @@
+ 		CleanPoC_DcacheRegion_Force((vm_offset_t)&cpu_ttep, sizeof(cpu_ttep));
+ 		CleanPoC_DcacheRegion_Force((vm_offset_t)bootstrap_pagetables, BOOTSTRAP_TABLE_SIZE);
+ 		__builtin_arm_dsb(DSB_SY);
++		kprintf("SWEET SMP START: cpu=%d PoC clean done\n", cpu);
+ #endif
+ #if defined(KERNEL_INTEGRITY_CTRR)
+ 
+@@ -966,7 +974,13 @@
+ 			break;
+ 		}
+ #endif
++#if defined(SWEET)
++		kprintf("SWEET SMP START: cpu=%d calling PE_cpu_start id=%u\n", cpu, cpu_data_ptr->cpu_id);
++#endif
+ 		(void) PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
++#if defined(SWEET)
++		kprintf("SWEET SMP START: cpu=%d PE_cpu_start returned\n", cpu);
++#endif
+ 	}
+ 
+ 	return KERN_SUCCESS;
