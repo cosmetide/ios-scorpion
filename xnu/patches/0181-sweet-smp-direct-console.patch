@@ -1,0 +1,101 @@
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -23,6 +23,23 @@
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ extern "C" uint32_t sweet_smp_stage[MAX_CPUS];
+ extern "C" uint64_t sweet_smp_early_state[MAX_CPUS][16];
++
++/* Print directly through the early PE console without the kprintf/IOLog locks. */
++static void
++sweet_smp_console_hex(const char *label, uint64_t value)
++{
++	if (PE_kputc == NULL) {
++		return;
++	}
++	while (*label != '\0') {
++		PE_kputc(*label++);
++	}
++	static const char digits[] = "0123456789abcdef";
++	for (int shift = 60; shift >= 0; shift -= 4) {
++		PE_kputc(digits[(value >> shift) & 0xf]);
++	}
++	PE_kputc('\n');
++}
+ 
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+@@ -162,46 +179,40 @@
+ 		nanoseconds_to_deadline(5 * NSEC_PER_SEC, &deadline);
+ 		uint32_t last_stage = 0;
+ 		uint64_t last_early_stage = 0;
+-		static const char *const stage_names[] = {
+-			"unknown", "after mt_wake_per_core", "after CTRR", "before slave_main",
+-			"before load_context", "processor_start_thread", "cpu_machine_init",
+-			"after cpu_machine_init", "after clock_init"
+-		};
+ 		while (__atomic_load_n(&cpu->initialized, __ATOMIC_ACQUIRE) == 0 ||
+ 		    !sweet_cpu_signal_is_enabled(i)) {
+ 			if (i != 0) {
+ 				uint64_t early_stage = __atomic_load_n(&sweet_smp_early_state[i][0], __ATOMIC_ACQUIRE);
+ 				if (early_stage != last_early_stage) {
+-					IOLog("SWEET SMP: cpu=%u early stage=%llu\n", i, (unsigned long long)early_stage);
++					sweet_smp_console_hex("SWEET CPU1 EARLY STAGE=0x", early_stage);
+ 					last_early_stage = early_stage;
+ 				}
+ 				uint64_t fault = __atomic_load_n(&sweet_smp_early_state[i][1], __ATOMIC_ACQUIRE);
+ 				if (fault == 0x534d5046ULL) {
+-					IOLog("SWEET SMP FAULT: cpu=%u MPIDR=0x%llx EL=%llu vector=%llu ESR=0x%llx ELR=0x%llx FAR=0x%llx SPSR=0x%llx HPFAR=0x%llx\n", i,
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][2], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][3], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][4], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][5], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][6], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][7], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][8], __ATOMIC_RELAXED),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][9], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT MPIDR=0x", __atomic_load_n(&sweet_smp_early_state[i][2], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT EL=0x", __atomic_load_n(&sweet_smp_early_state[i][3], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT VECTOR=0x", __atomic_load_n(&sweet_smp_early_state[i][4], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT ESR=0x", __atomic_load_n(&sweet_smp_early_state[i][5], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT ELR=0x", __atomic_load_n(&sweet_smp_early_state[i][6], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT FAR=0x", __atomic_load_n(&sweet_smp_early_state[i][7], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT SPSR=0x", __atomic_load_n(&sweet_smp_early_state[i][8], __ATOMIC_RELAXED));
++					sweet_smp_console_hex("SWEET CPU1 FAULT HPFAR=0x", __atomic_load_n(&sweet_smp_early_state[i][9], __ATOMIC_RELAXED));
+ 					panic("SWEET SMP: cpu=%u trapped before normal startup", i);
+ 				}
+ 			}
+ 			if (i == 1) {
+ 				uint32_t stage = __atomic_load_n(&sweet_smp_stage[1], __ATOMIC_ACQUIRE);
+ 				if (stage != 0 && stage != last_stage) {
+-					IOLog("SWEET SMP: cpu=1 %s\n",
+-					    stage < (sizeof(stage_names) / sizeof(stage_names[0])) ? stage_names[stage] : "invalid stage");
++					sweet_smp_console_hex("SWEET CPU1 XNU STAGE=0x", stage);
+ 					last_stage = stage;
+ 				}
+ 			}
+ 			if (mach_absolute_time() > deadline) {
+ 				if (i != 0) {
+-					IOLog("SWEET CPU: cpu=%u last early stage=%llu fault=0x%llx\n", i,
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][0], __ATOMIC_ACQUIRE),
+-					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][1], __ATOMIC_ACQUIRE));
++					sweet_smp_console_hex("SWEET CPU1 TIMEOUT LAST STAGE=0x",
++					    __atomic_load_n(&sweet_smp_early_state[i][0], __ATOMIC_ACQUIRE));
++					sweet_smp_console_hex("SWEET CPU1 TIMEOUT FAULT=0x",
++					    __atomic_load_n(&sweet_smp_early_state[i][1], __ATOMIC_ACQUIRE));
+ 				}
+ 				IOLog("SWEET CPU: cpu=%u mpidr=0x%x NOT alive after 5s\n",
+ 				    i, topology->cpus[i].phys_id);
+@@ -289,10 +300,13 @@
+ 		panic("SWEET CPU: cpu=%u unsupported restart", getCPUNumber());
+ 	}
+ 	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
++	sweet_smp_console_hex("SWEET CPU_ON MPIDR=0x", cpu->phys_id);
++	sweet_smp_console_hex("SWEET CPU_ON ENTRY_PA=0x", entry);
+ 	IOLog("SWEET CPU: cpu=%u CPU_ON target=0x%x entry_pa=0x%llx context=%u\n",
+ 	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
+ 	__builtin_arm_dsb(DSB_SY);
+ 	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
++	sweet_smp_console_hex("SWEET CPU_ON PSCI_RC=0x", (uint32_t)rc);
+ 	IOLog("SWEET CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
+ 	/* cpu_start() discards PE_cpu_start's return; do not silently carry on. */
+ 	if (rc != 0) {
