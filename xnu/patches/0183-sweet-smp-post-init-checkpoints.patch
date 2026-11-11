@@ -1,0 +1,125 @@
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -180,7 +180,9 @@
+ 		uint32_t last_stage = 0;
+ 		uint64_t last_early_stage = 0;
+ 		while (__atomic_load_n(&cpu->initialized, __ATOMIC_ACQUIRE) == 0 ||
+-		    !sweet_cpu_signal_is_enabled(i)) {
++		    !sweet_cpu_signal_is_enabled(i) ||
++		    (i != topology->boot_cpu->cpu_id &&
++		    __atomic_load_n(&sweet_smp_stage[i], __ATOMIC_ACQUIRE) < 10)) {
+ 			if (i != 0) {
+ 				uint64_t early_stage = __atomic_load_n(&sweet_smp_early_state[i][0], __ATOMIC_ACQUIRE);
+ 				if (early_stage != last_early_stage) {
+@@ -200,10 +202,10 @@
+ 					panic("SWEET SMP: cpu=%u trapped before normal startup", i);
+ 				}
+ 			}
+-			if (i == 1) {
+-				uint32_t stage = __atomic_load_n(&sweet_smp_stage[1], __ATOMIC_ACQUIRE);
++			if (i != topology->boot_cpu->cpu_id) {
++				uint32_t stage = __atomic_load_n(&sweet_smp_stage[i], __ATOMIC_ACQUIRE);
+ 				if (stage != 0 && stage != last_stage) {
+-					sweet_smp_console_hex("SWEET CPU1 XNU STAGE=0x", stage);
++					sweet_smp_console_hex("SWEET SMP CPU STAGE=0x", stage);
+ 					last_stage = stage;
+ 				}
+ 			}
+@@ -214,26 +216,40 @@
+ 					sweet_smp_console_hex("SWEET CPU1 TIMEOUT FAULT=0x",
+ 					    __atomic_load_n(&sweet_smp_early_state[i][1], __ATOMIC_ACQUIRE));
+ 				}
+-				IOLog("SWEET CPU: cpu=%u mpidr=0x%x NOT alive after 5s\n",
+-				    i, topology->cpus[i].phys_id);
+-				panic("SWEET CPU: cpu=%u startup timeout (reset/MMU/GIC/SGI)", i);
++				if (i != topology->boot_cpu->cpu_id) {
++					sweet_smp_console_hex("SWEET SMP TIMEOUT XNU STAGE=0x",
++					    __atomic_load_n(&sweet_smp_stage[i], __ATOMIC_ACQUIRE));
++				}
++				IOLog("SWEET CPU: cpu=%u startup not ready after 5s\n", i);
++				panic("SWEET CPU: cpu=%u startup timeout at stage=%u", i,
++				    __atomic_load_n(&sweet_smp_stage[i], __ATOMIC_ACQUIRE));
+ 			}
+ 			IOSleep(1);
+ 		}
+ 		/* MIDR: implementer 0x41, part 0xd05 = Cortex-A55, 0xd0b = Cortex-A76 */
++		if (i != topology->boot_cpu->cpu_id) {
++			sweet_smp_console_hex("SWEET SMP CPU START_THREAD READY=0x", i);
++		}
+ 		IOLog("SWEET CPU: cpu=%u mpidr=0x%x midr=0x%08x (%s r%up%u) came alive; SGI1 OK\n",
+ 		    i, topology->cpus[i].phys_id, cpu->midr,
+ 		    ((cpu->midr >> 4) & 0xfff) == 0xd0b ? "A76" :
+ 		    ((cpu->midr >> 4) & 0xfff) == 0xd05 ? "A55" : "?",
+ 		    (cpu->midr >> 20) & 0xf, cpu->midr & 0xf);
+ 	}
+-	/* Publish exactly once, after every selected CPU has completed initCPU(). */
++	/* Publish after every secondary also completes its per-CPU clock_init(). */
++	sweet_smp_console_hex("SWEET SMP ML_CPU_INIT_COMPLETED BEGIN=0x", 1);
+ 	ml_cpu_init_completed();
++	sweet_smp_console_hex("SWEET SMP ML_CPU_INIT_COMPLETED END=0x", 2);
++	sweet_smp_console_hex("SWEET SMP CPUS_RUNNING BEGIN=0x", 3);
+ 	__atomic_load_n(&sweet_cpus[topology->boot_cpu->cpu_id], __ATOMIC_ACQUIRE)->cpusRunning();
++	sweet_smp_console_hex("SWEET SMP CPUS_RUNNING END=0x", 4);
+ 	IOService::publishResource(gIOAllCPUInitializedKey, kOSBooleanTrue);
++	sweet_smp_console_hex("SWEET SMP MAX_CPUS BEGIN=0x", 5);
+ 	ml_set_max_cpus(topology->max_cpu_id + 1);
++	sweet_smp_console_hex("SWEET SMP MAX_CPUS END=0x", 6);
+ 	IOLog("SWEET CPU: %u/%u CPUs initialized, SGI1 verified\n",
+ 	    topology->num_cpus, topology->num_cpus);
++	sweet_smp_console_hex("SWEET SMP STARTALL COMPLETE=0x", topology->num_cpus);
+ 	thread_terminate(current_thread());
+ }
+ 
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -572,15 +572,15 @@
+ slave_machine_init(__unused void *param)
+ {
+ #if defined(SWEET)
+-	if (cpu_number() == 1) __atomic_store_n(&sweet_smp_stage[1], 6, __ATOMIC_RELEASE);
++	if (cpu_number() < MAX_CPUS) __atomic_store_n(&sweet_smp_stage[cpu_number()], 6, __ATOMIC_RELEASE);
+ #endif
+ 	cpu_machine_init();     /* Initialize the processor */
+ #if defined(SWEET)
+-	if (cpu_number() == 1) __atomic_store_n(&sweet_smp_stage[1], 7, __ATOMIC_RELEASE);
++	if (cpu_number() < MAX_CPUS) __atomic_store_n(&sweet_smp_stage[cpu_number()], 7, __ATOMIC_RELEASE);
+ #endif
+ 	clock_init();           /* Init the clock */
+ #if defined(SWEET)
+-	if (cpu_number() == 1) __atomic_store_n(&sweet_smp_stage[1], 8, __ATOMIC_RELEASE);
++	if (cpu_number() < MAX_CPUS) __atomic_store_n(&sweet_smp_stage[cpu_number()], 8, __ATOMIC_RELEASE);
+ #endif
+ }
+ 
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -874,9 +874,16 @@
+ 
+ #if defined(SWEET)
+ 	extern uint32_t sweet_smp_stage[MAX_CPUS];
+-	if (processor->cpu_id == 1) __atomic_store_n(&sweet_smp_stage[1], 5, __ATOMIC_RELEASE);
++	if ((unsigned int)processor->cpu_id < MAX_CPUS) {
++		__atomic_store_n(&sweet_smp_stage[processor->cpu_id], 5, __ATOMIC_RELEASE);
++	}
+ #endif
+ 	slave_machine_init(machine_param);
++#if defined(SWEET)
++	if ((unsigned int)processor->cpu_id < MAX_CPUS) {
++		__atomic_store_n(&sweet_smp_stage[processor->cpu_id], 9, __ATOMIC_RELEASE);
++	}
++#endif
+ 
+ 	/*
+ 	 *	If running the idle processor thread,
+@@ -886,6 +893,11 @@
+ 		thread_block(idle_thread);
+ 	}
+ 
++#if defined(SWEET)
++	if ((unsigned int)processor->cpu_id < MAX_CPUS) {
++		__atomic_store_n(&sweet_smp_stage[processor->cpu_id], 10, __ATOMIC_RELEASE);
++	}
++#endif
+ 	thread_terminate(self);
+ 	/*NOTREACHED*/
+ }
