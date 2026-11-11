@@ -1,0 +1,58 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -128,7 +128,7 @@
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 20) {
++	if (early_disabled || stage > 21) {
+ 		return;
+ 	}
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -587,6 +587,7 @@
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	sweet_early_mark(21, "console setup complete");
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -595,8 +596,10 @@
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	sweet_early_mark(21, "cpu idle init complete");
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	sweet_early_mark(21, "PE_init_platform returned");
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -613,6 +616,7 @@
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	sweet_early_mark(21, "CPU timebase initialized");
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+@@ -620,6 +624,7 @@
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	sweet_early_mark(21, "PE_init_cpu returned");
+ 	fiq_context_init(TRUE);
+ 
+ 
+@@ -662,6 +667,7 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	sweet_early_mark(21, "entering machine_startup");
+ 	machine_startup(args);
+ }
+ 
