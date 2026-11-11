@@ -12,15 +12,14 @@
  #include <kern/cpu_number.h>
  #include <kern/task.h>
  #include <kern/ast.h>
-@@ -1100,9 +1105,16 @@
+@@ -1100,9 +1105,15 @@
  	bsd_init_kprintf("bsd_do_post - done");
  
  #if defined(SWEET)
 -	printf("SWEET SMP: bsdinit before launchd on cpu=%d\n", cpu_number());
 +	/* Run the bootstrap launchd exec on the boot CPU during X670 SMP bring-up. */
 +	processor_t previous_binding = thread_bind(cpu_to_processor(0));
-+	thread_block(THREAD_CONTINUE_NULL);
-+	printf("SWEET SMP: bsdinit resumed on cpu=%d after binding to cpu0\n", cpu_number());
++	printf("SWEET SMP: bsdinit requested cpu0 binding while on cpu=%d\n", cpu_number());
  #endif
  	load_init_program(p);
 +#if defined(SWEET)
