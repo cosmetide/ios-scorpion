@@ -10,8 +10,8 @@
 +		extern uint8_t sweet_secondary_entry[], sweet_secondary_entry_end[];
 +		/* Secondary CPU_ON starts by fetching code with its caches disabled.
 +		 * Clean every instruction range reached before the MMU is enabled. */
-+		CleanPoC_DcacheRegion_Force((vm_offset_t)LowResetVectorBase,
-+		    (vm_size_t)(LowResetVectorEnd - LowResetVectorBase));
++		/* Match the full pre-MMU reset/startup window used by known SMP ports. */
++		CleanPoC_DcacheRegion_Force((vm_offset_t)LowResetVectorBase, 0x10000);
 +		CleanPoC_DcacheRegion_Force((vm_offset_t)LowExceptionVectorBase, 0x1000);
 +		CleanPoC_DcacheRegion_Force((vm_offset_t)sweet_secondary_entry,
 +		    (vm_size_t)(sweet_secondary_entry_end - sweet_secondary_entry));
