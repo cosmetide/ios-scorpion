@@ -1,0 +1,374 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -36,6 +36,28 @@
+ #include <arm64/tunables/tunables.s>
+ #include <arm64/exception_asm.h>
+ 
++#if defined(SWEET)
++.macro SWEET_RECORD_STAGE value
++	mrs	x9, MPIDR_EL1
++	ubfx	x10, x9, #8, #8
++	cmp	x10, #8
++	b.hs	1f
++	adrp	x11, EXT(sweet_smp_early_state)@page
++	add	x11, x11, EXT(sweet_smp_early_state)@pageoff
++	add	x11, x11, x10, lsl #7
++	mov	x12, #\value
++	str	x12, [x11]
++	dc	cvac, x11
++	dsb	sy
++1:
++.endmacro
++
++.macro SWEET_EARLY_VECTOR value
++	mov	x15, #\value
++	b	Lsweet_early_exception
++.endmacro
++#endif
++
+ #if __ARM_KERNEL_PROTECT__
+ #include <arm/pmap.h>
+ #endif /* __ARM_KERNEL_PROTECT__ */
+@@ -114,13 +136,23 @@
+ 
+ 	/* EL1 SP1: These vectors trap errors during early startup on non-boot CPUs. */
+ 	.align	9
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 16
++	.align	7
++	SWEET_EARLY_VECTOR 17
++	.align	7
++	SWEET_EARLY_VECTOR 18
++	.align	7
++	SWEET_EARLY_VECTOR 19
++#else
++	b		.
++	.align	7
++	b		.
++	.align	7
++	b		.
++	.align	7
++	b		.
++#endif
+ 
+ 	.align	7
+ 	.globl EXT(reset_vector)
+@@ -136,8 +168,9 @@
+ 	add     x0, x0, EXT(LowExceptionVectorBase)@pageoff
+ 	msr     VBAR_EL1, x0
+ #endif
+-
+-
++#if defined(SWEET)
++	SWEET_RECORD_STAGE 4
++#endif
+ 
+ 	// Process reset handlers
+ 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
+@@ -177,6 +210,9 @@
+ 	cmp		x0, x2
+ 	bne		Lskip_cpu_reset_handler
+ 1:
++#if defined(SWEET)
++	SWEET_RECORD_STAGE 5
++#endif
+ 
+ #if HAS_BP_RET
+ 	bl		EXT(set_bp_ret)
+@@ -191,6 +227,9 @@
+ 	msr		TPIDR_EL1, x13
+ #endif /* __ARM_KERNEL_PROTECT__ */
+ 
++#if defined(SWEET)
++	SWEET_RECORD_STAGE 6
++#endif
+ 	blr		x0
+ Lskip_cpu_reset_handler:
+ 	b		.									// Hang if the handler is NULL or returns
+@@ -233,40 +272,148 @@
+ 	.global	EXT(LowExceptionVectorBase)
+ LEXT(LowExceptionVectorBase)
+ 	/* EL1 SP 0 */
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 0
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 1
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 2
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 3
++#else
++	b		.
++#endif
+ 	/* EL1 SP1 */
+ 	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 4
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 5
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 6
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 7
++#else
++	b		.
++#endif
+ 	/* EL0 64 */
+ 	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 8
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 9
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 10
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 11
++#else
++	b		.
++#endif
+ 	/* EL0 32 */
+ 	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
+-	.align	7
+-	b		.
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 12
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 13
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 14
++#else
++	b		.
++#endif
++	.align	7
++#if defined(SWEET)
++	SWEET_EARLY_VECTOR 15
++#else
++	b		.
++#endif
++#if defined(SWEET)
++/* No C stack is available here. Save the fault into a per-CPU DRAM mailbox. */
++Lsweet_early_exception:
++	mrs	x0, MPIDR_EL1
++	ubfx	x1, x0, #8, #8
++	cmp	x1, #8
++	b.hs	Lsweet_early_exception_spin
++	adrp	x2, EXT(sweet_smp_early_state)@page
++	add	x2, x2, EXT(sweet_smp_early_state)@pageoff
++	add	x2, x2, x1, lsl #7
++	str	x0, [x2, #16]
++	mrs	x3, CurrentEL
++	str	x3, [x2, #24]
++	str	x15, [x2, #32]
++	cmp	x3, #8
++	b.eq	Lsweet_early_exception_el2
++	mrs	x4, ESR_EL1
++	mrs	x5, ELR_EL1
++	mrs	x6, FAR_EL1
++	mrs	x7, SPSR_EL1
++	mov	x8, xzr
++	b	Lsweet_early_exception_save
++Lsweet_early_exception_el2:
++	mrs	x4, ESR_EL2
++	mrs	x5, ELR_EL2
++	mrs	x6, FAR_EL2
++	mrs	x7, SPSR_EL2
++	mrs	x8, HPFAR_EL2
++Lsweet_early_exception_save:
++	str	x4, [x2, #40]
++	str	x5, [x2, #48]
++	str	x6, [x2, #56]
++	str	x7, [x2, #64]
++	str	x8, [x2, #72]
++	movz	x9, #0x5046
++	movk	x9, #0x534d, lsl #16
++	add	x10, x2, #64
++	dc	cvac, x10
++	str	x9, [x2, #8]
++	dc	cvac, x2
++	dsb	sy
++Lsweet_early_exception_spin:
++	b	Lsweet_early_exception_spin
++#endif
+ 	.align 12, 0
+ 
+ #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+@@ -289,6 +436,7 @@
+ 	.globl EXT(sweet_secondary_entry)
+ LEXT(sweet_secondary_entry)
+ 	msr		DAIFSet, #0xf
++	SWEET_RECORD_STAGE 1
+ 	mrs		x1, CurrentEL
+ 	cmp		x1, #0x4
+ 	b.eq	Lsweet_secondary_el1
+@@ -319,11 +467,13 @@
+ 	add		x1, x1, Lsweet_secondary_el1@pageoff
+ 	msr		ELR_EL2, x1
+ 	mov		x1, #0x3c5			// DAIF masked, AArch64 EL1h
++	SWEET_RECORD_STAGE 2
+ 	msr		SPSR_EL2, x1
+ 	eret
+ Lsweet_secondary_bad_el:
+ 	b		.
+ Lsweet_secondary_el1:
++	SWEET_RECORD_STAGE 3
+ 	/* x0 is deliberately unused; reset_vector selects CPU data by MPIDR. */
+ 	msr		SPSel, #1
+ 	b		EXT(LowResetVectorBase)
+@@ -393,6 +543,9 @@
+ 	msr		SPSel, #0
+ 	mov		sp, x0
+ 
++#if defined(SWEET)
++	SWEET_RECORD_STAGE 7
++#endif
+ 	// Convert lr to KVA
+ 	add		lr, lr, x22
+ 	sub		lr, lr, x23
+
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -564,6 +564,8 @@
+ #if defined(SWEET)
+ /* CPU1 writes milestones only; CPU0 polls and prints them to avoid console races. */
+ uint32_t sweet_smp_stage[MAX_CPUS];
++/* 16 words per CPU; assembly writes this before MMU/stack/logger setup. */
++uint64_t sweet_smp_early_state[MAX_CPUS][16] __attribute__((aligned(64)));
+ #endif
+ 
+ void
+
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -22,6 +22,7 @@
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ extern "C" uint32_t sweet_smp_stage[MAX_CPUS];
++extern "C" uint64_t sweet_smp_early_state[MAX_CPUS][16];
+ 
+ class SweetCPU;
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+@@ -160,6 +161,7 @@
+ 		/* processor_start() is asynchronous for secondaries in this XNU. */
+ 		nanoseconds_to_deadline(5 * NSEC_PER_SEC, &deadline);
+ 		uint32_t last_stage = 0;
++		uint64_t last_early_stage = 0;
+ 		static const char *const stage_names[] = {
+ 			"unknown", "after mt_wake_per_core", "after CTRR", "before slave_main",
+ 			"before load_context", "processor_start_thread", "cpu_machine_init",
+@@ -167,6 +169,26 @@
+ 		};
+ 		while (__atomic_load_n(&cpu->initialized, __ATOMIC_ACQUIRE) == 0 ||
+ 		    !sweet_cpu_signal_is_enabled(i)) {
++			if (i != 0) {
++				uint64_t early_stage = __atomic_load_n(&sweet_smp_early_state[i][0], __ATOMIC_ACQUIRE);
++				if (early_stage != last_early_stage) {
++					IOLog("SWEET SMP: cpu=%u early stage=%llu\n", i, (unsigned long long)early_stage);
++					last_early_stage = early_stage;
++				}
++				uint64_t fault = __atomic_load_n(&sweet_smp_early_state[i][1], __ATOMIC_ACQUIRE);
++				if (fault == 0x534d5046ULL) {
++					IOLog("SWEET SMP FAULT: cpu=%u MPIDR=0x%llx EL=%llu vector=%llu ESR=0x%llx ELR=0x%llx FAR=0x%llx SPSR=0x%llx HPFAR=0x%llx\n", i,
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][2], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][3], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][4], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][5], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][6], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][7], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][8], __ATOMIC_RELAXED),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][9], __ATOMIC_RELAXED));
++					panic("SWEET SMP: cpu=%u trapped before normal startup", i);
++				}
++			}
+ 			if (i == 1) {
+ 				uint32_t stage = __atomic_load_n(&sweet_smp_stage[1], __ATOMIC_ACQUIRE);
+ 				if (stage != 0 && stage != last_stage) {
+@@ -176,6 +198,11 @@
+ 				}
+ 			}
+ 			if (mach_absolute_time() > deadline) {
++				if (i != 0) {
++					IOLog("SWEET CPU: cpu=%u last early stage=%llu fault=0x%llx\n", i,
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][0], __ATOMIC_ACQUIRE),
++					    (unsigned long long)__atomic_load_n(&sweet_smp_early_state[i][1], __ATOMIC_ACQUIRE));
++				}
+ 				IOLog("SWEET CPU: cpu=%u mpidr=0x%x NOT alive after 5s\n",
+ 				    i, topology->cpus[i].phys_id);
+ 				panic("SWEET CPU: cpu=%u startup timeout (reset/MMU/GIC/SGI)", i);
+
