@@ -1,0 +1,19 @@
+--- a/osfmk/arm64/tlb.h
++++ b/osfmk/arm64/tlb.h
+@@ -51,6 +51,16 @@
+ static inline void
+ sync_tlb_flush(void)
+ {
++#if defined(SWEET)
++	/*
++	 * Cortex-A76 erratum 1286807 (r0p0-r3p0) and Cortex-A55 erratum 2441007:
++	 * a broadcast TLBI completed by a DSB may leave stale entries. Like Linux's
++	 * ARM64_WORKAROUND_REPEAT_TLBI, a second (dummy) broadcast TLBI and DSB
++	 * after the first DSB completes every invalidation issued before it.
++	 */
++	__builtin_arm_dsb(DSB_ISH);
++	asm volatile ("tlbi vale1is, xzr" ::: "memory");
++#endif
+ 	__builtin_arm_dsb(DSB_ISH);
+ 	__builtin_arm_isb(ISB_SY);
+ }
