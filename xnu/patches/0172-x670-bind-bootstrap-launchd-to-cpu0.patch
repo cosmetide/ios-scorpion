@@ -1,0 +1,27 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -103,6 +103,7 @@
+ 
+ #include <kern/startup.h>
+ #include <kern/thread.h>
++#include <kern/processor.h>
+ #include <kern/cpu_number.h>
+ #include <kern/task.h>
+ #include <kern/ast.h>
+@@ -1100,9 +1101,15 @@
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
+ #if defined(SWEET)
+-	printf("SWEET SMP: bsdinit before launchd on cpu=%d\n", cpu_number());
++	/* Run the bootstrap launchd exec on the boot CPU during X670 SMP bring-up. */
++	processor_t previous_binding = thread_bind(processor_array[0]);
++	printf("SWEET SMP: bsdinit started on cpu=%d, bound to cpu0 for launchd\n", cpu_number());
+ #endif
+ 	load_init_program(p);
++#if defined(SWEET)
++	thread_bind(previous_binding);
++	printf("SWEET SMP: initial launchd exec returned on cpu=%d\n", cpu_number());
++#endif
+ 	lock_trace = 1;
+ }
+ 
