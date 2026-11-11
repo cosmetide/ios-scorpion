@@ -1,0 +1,87 @@
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -73,6 +73,61 @@
+ 	panic("%s: cannot find GICR base for core %u", __func__, ml_get_cpu_number(phys_id));
+ }
+ 
++#if defined(SWEET)
++/* Optional SMP diagnostic: have the boot CPU wake a secondary's GICR before PSCI. */
++int
++sweet_prepare_gicr(uint32_t phys_id)
++{
++	if (gicr_base == 0 || gicr_size == 0) {
++		return 0;
++	}
++
++	uint32_t affinity = phys_id & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
++	vm_offset_t target = 0;
++	for (vm_offset_t offset = 0; offset < gicr_size; offset += GICR_PE_SIZE) {
++		vm_offset_t frame = gicr_base + offset;
++		uint64_t typer = _gic_read64(frame + GICR_TYPER);
++		uint32_t frame_affinity = (uint32_t)(typer >> GICR_TYPER_AFFINITY_VALUE_SHIFT) &
++		    (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
++		if (frame_affinity == affinity) {
++			target = frame;
++			break;
++		}
++		if (typer & GICR_TYPER_LAST) {
++			break;
++		}
++	}
++	if (target == 0) {
++		return 0;
++	}
++
++	uint32_t waker = _gic_read32(target + GICR_WAKER);
++	if (waker & GICR_WAKER_CHILDRENASLEEP) {
++		_gic_write32(target + GICR_WAKER, waker & ~GICR_WAKER_PROCESSORSLEEP);
++		__builtin_arm_dsb(DSB_SY);
++		uint64_t deadline;
++		nanoseconds_to_deadline(os_atomic_load(&gicr_wake_timeout_ns, relaxed), &deadline);
++		while (_gic_read32(target + GICR_WAKER) & GICR_WAKER_CHILDRENASLEEP) {
++			if (gicr_wake_timeout_ns > 0 && mach_absolute_time() > deadline) {
++				return 0;
++			}
++		}
++	}
++	vm_offset_t sgi_frame = target + 0x10000;
++	_gic_write32(sgi_frame + 0x180, 0xFFFFFFFF);
++	_gic_write32(sgi_frame + GICR_IGROUPR0, 0xFFFFFFFF);
++	_gic_write32(sgi_frame + 0x10C00, 0);
++	_gic_write32(sgi_frame + 0x10280, 0xFFFFFFFF);
++	for (unsigned int offset = GICR_IPRIORITYR0; offset < GICR_IPRIORITYR0 + 0x20; offset += 4) {
++		_gic_write32(sgi_frame + offset, 0xA0A0A0A0);
++	}
++	_gic_write32(sgi_frame + GICR_ISENABLER0,
++	    (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++	__builtin_arm_dsb(DSB_SY);
++	return 1;
++}
++#endif
++
+ void
+ pe_init_fiq()
+ {
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -255,3 +255,4 @@
++extern "C" int sweet_prepare_gicr(uint32_t phys_id);
+ kern_return_t
+ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ {
+@@ -260,5 +261,15 @@
+ 	if (start_paddr != 0 || arg_paddr != 0 || cpu->phys_id == 0 ||
+ 	    __atomic_load_n(&initialized, __ATOMIC_ACQUIRE) != 0) {
+ 		panic("SWEET CPU: cpu=%u unsupported restart", getCPUNumber());
+ 	}
++	uint32_t remote_gic = 0;
++	PE_parse_boot_argn("sheng-smp-gic", &remote_gic, sizeof(remote_gic));
++	if (remote_gic != 0) {
++		int prepared = sweet_prepare_gicr(cpu->phys_id);
++		IOLog("SWEET GIC: cpu=%u MPIDR=0x%x remote redistributor %s\n",
++		    getCPUNumber(), cpu->phys_id, prepared ? "awake" : "wake failed");
++		if (!prepared) {
++			panic("SWEET GIC: cpu=%u remote redistributor preparation failed", getCPUNumber());
++		}
++	}
+ 	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
