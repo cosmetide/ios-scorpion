@@ -1,0 +1,31 @@
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -922,6 +922,15 @@
+ #if defined(SWEET)
+ 		/* The reset stub loads these through physical addresses with caches off.
+ 		 * Use VA range cleans to PoC, including on coherent-I/O builds. */
+ 		extern uint8_t bootstrap_pagetables[BOOTSTRAP_TABLE_SIZE];
++		extern uint8_t LowResetVectorBase[], LowResetVectorEnd[];
++		extern uint8_t LowExceptionVectorBase[];
++		extern uint8_t sweet_secondary_entry[], sweet_secondary_entry_end[];
++		/* Secondary CPU_ON starts by fetching code with its caches disabled.
++		 * Clean every instruction range reached before the MMU is enabled. */
++		CleanPoC_DcacheRegion_Force((vm_offset_t)LowResetVectorBase,
++		    (vm_size_t)(LowResetVectorEnd - LowResetVectorBase));
++		CleanPoC_DcacheRegion_Force((vm_offset_t)LowExceptionVectorBase, 0x1000);
++		CleanPoC_DcacheRegion_Force((vm_offset_t)sweet_secondary_entry,
++		    (vm_size_t)(sweet_secondary_entry_end - sweet_secondary_entry));
+ 		CleanPoC_DcacheRegion_Force((vm_offset_t)CpuDataEntries, sizeof(CpuDataEntries));
+ 		CleanPoC_DcacheRegion_Force((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t));
+ 		CleanPoC_DcacheRegion_Force((vm_offset_t)&ResetHandlerData, sizeof(ResetHandlerData));
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -329,6 +329,8 @@
+ 	/* x0 is deliberately unused; reset_vector selects CPU data by MPIDR. */
+ 	msr		SPSel, #1
+ 	b		EXT(LowResetVectorBase)
++	.globl EXT(sweet_secondary_entry_end)
++LEXT(sweet_secondary_entry_end)
+ #endif /* SWEET */
+ 
+ 	.align 2
