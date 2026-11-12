@@ -56,7 +56,8 @@ VIVA_ECID = 0x5649564100000001  # 'VIVA' + 1, synthetic
 VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
 
 # --x670: Infinix Note 12 G96 (X670), same MT6781 SoC as viva (same GIC, timer,
-# UFS and peripheral addresses) but 8 GiB of RAM and a command-mode panel.
+# UFS and peripheral addresses) but 8 GiB of RAM and a command-mode panel. It
+# gets only explicitly supported shared-SoC nubs (keys, touch, Mali GPU).
 # /memory = 0x40000000-0x240000000; every reservation is below 0xc0000000
 # except the two 4 KiB dramc-rk pages at 0x13ffff000 (just below the base) and
 # 0x23ffff000 (just below the top). So the upper rank 0x140000000-0x23e000000
@@ -117,6 +118,19 @@ def spi(n, flags):
 def wifi_mac(ecid):
     """Synthetic, locally administered WiFi MAC (/chosen mac-address-wifi0, the wlan node, en0)."""
     return bytes([0x02]) + struct.pack('>Q', ecid)[3:7] + b'\x01'
+
+
+def viva_gpu(ph, gic_ph):
+    """Mali-G57 MC2 and its MT6781 MFG power/clock blocks (shared by viva and X670)."""
+    return node('gpu', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6781-mali')),
+        ('reg', u64(0x13000000 - SOC_BASE, 0x4000, 0x13fbf000 - SOC_BASE, 0x1000,
+                    0x10006000 - SOC_BASE, 0x1000, 0x10000000 - SOC_BASE, 0x1000,
+                    0x1000c000 - SOC_BASE, 0x1000, 0x10001000 - SOC_BASE, 0x1000)),
+        ('interrupt-parent', u32(gic_ph)),
+        ('interrupts', spi(0x112, IRQ_LEVEL_HIGH) + spi(0x113, IRQ_LEVEL_HIGH) + spi(0x114, IRQ_LEVEL_HIGH)),
+    ])
 
 
 def viva_devices(ph, phandle, gic_ph, ecid):
@@ -239,15 +253,7 @@ def viva_devices(ph, phandle, gic_ph, ecid):
         # belong to ARM's kbase and stay unused): iokit/Kernel/arm/VivaGPU.cpp, started only with the
         # boot-arg vivagpu=1|2. reg: the Mali, then the MFG power blocks it drives: mfgcfg, SPM,
         # topckgen, apmixed, infracfg_ao (sequences from Xiaomi's gpufreq/clk-mt6781-pg).
-        node('gpu', [
-            ph(),
-            ('compatible', cstr('mediatek,mt6781-mali')),
-            ('reg', u64(0x13000000 - SOC_BASE, 0x4000, 0x13fbf000 - SOC_BASE, 0x1000,
-                        0x10006000 - SOC_BASE, 0x1000, 0x10000000 - SOC_BASE, 0x1000,
-                        0x1000c000 - SOC_BASE, 0x1000, 0x10001000 - SOC_BASE, 0x1000)),
-            ('interrupt-parent', u32(gic_ph)),
-            ('interrupts', spi(0x112, IRQ_LEVEL_HIGH) + spi(0x113, IRQ_LEVEL_HIGH) + spi(0x114, IRQ_LEVEL_HIGH)),
-        ]),
+        viva_gpu(ph, gic_ph),
         # CONNSYS WiFi (MT6781 + MT6631): iokit/Kernel/arm/VivaWLAN.cpp (registry for configd / wifid) on top of
         # bsd/dev/viva_wifi.c + viva_wlan.c (the station, en0). launchd starts wifid only when a node named "wlan"
         # exists (_LimitLoadToDeviceTree); MobileGestalt reads local-mac-address here.
@@ -323,7 +329,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     viva=True: Redmi Note 11 Pro 4G addresses. Without viva_ufs there is no UFS node, so the
     kernel never touches storage; with it the kernel drives the MediaTek host LK left running.
-    x670=True: Infinix Note 12 G96 (implies viva; own RAM/FB, no viva device nubs yet)."""
+    x670=True: Infinix Note 12 G96 (own RAM/FB and explicit MT6781 device nubs)."""
     if x670:
         viva = True
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
@@ -449,6 +455,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
     x670_touch = x670_touch_bus(ph, gic_ph) if x670 else None
     x670_keys = x670_keypad(ph, gic_ph) if x670 else None
     x670_gpio_node = x670_gpio(ph) if x670 else None
+    x670_gpu_node = viva_gpu(ph, gic_ph) if x670 else None
     arm_io = node('arm-io', [
         ph(),
         ('device_type', cstr('sweet-io')),
@@ -472,7 +479,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False, x670
             ('canvas-width', u32(FB_W if x670 else 1125)),
             ('canvas-height', u32(FB_H if x670 else 2436)),
         ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva and not x670 else []) +
-        ([x670_gpio_node, x670_keys, pwrap, x670_touch] if x670 else []))
+        ([x670_gpio_node, x670_keys, pwrap, x670_touch, x670_gpu_node] if x670 else []))
 
     fbcon = node('sweet-fbcon', [
         ph(),
