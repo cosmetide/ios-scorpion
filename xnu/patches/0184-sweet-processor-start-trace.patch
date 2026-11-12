@@ -1,0 +1,57 @@
+--- a/osfmk/kern/processor.c
++++ b/osfmk/kern/processor.c
+@@ -910,9 +910,23 @@
+ 	}
+ 
+ 	ml_cpu_power_enable(processor->cpu_id);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d before begin_state_transition\n", processor->cpu_id);
++#endif
+ 	ml_cpu_begin_state_transition(processor->cpu_id);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d begin_state_transition returned\n", processor->cpu_id);
++	kprintf("SWEET SMP PROC: cpu=%d before CPU_BOOT_REQUESTED event\n", processor->cpu_id);
++#endif
+ 	ml_broadcast_cpu_event(CPU_BOOT_REQUESTED, processor->cpu_id);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d CPU_BOOT_REQUESTED event returned\n", processor->cpu_id);
++	kprintf("SWEET SMP PROC: cpu=%d before cpu_start\n", processor->cpu_id);
++#endif
+ 	result = cpu_start(processor->cpu_id);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d cpu_start returned result=%d\n", processor->cpu_id, result);
++#endif
+ #if defined (__arm__) || defined (__arm64__)
+ 	assert(result == KERN_SUCCESS);
+ #else
+@@ -937,14 +951,30 @@
+ 		processor_wait_for_start(processor);
+ 	}
+ 
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d before end_state_transition\n", processor->cpu_id);
++#endif
+ 	ml_cpu_end_state_transition(processor->cpu_id);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d end_state_transition returned\n", processor->cpu_id);
++	kprintf("SWEET SMP PROC: cpu=%d before CPU_ACTIVE event\n", processor->cpu_id);
++#endif
+ 	ml_broadcast_cpu_event(CPU_ACTIVE, processor->cpu_id);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d CPU_ACTIVE event returned\n", processor->cpu_id);
++#endif
+ 
+ #if CONFIG_KCOV
+ 	kcov_start_cpu(processor->cpu_id);
+ #endif
+ 
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d before unlock processor_updown_lock\n", processor->cpu_id);
++#endif
+ 	lck_mtx_unlock(&processor_updown_lock);
++#if defined(SWEET)
++	kprintf("SWEET SMP PROC: cpu=%d processor_startup complete\n", processor->cpu_id);
++#endif
+ 	return KERN_SUCCESS;
+ }
+ 
