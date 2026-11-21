@@ -1,0 +1,39 @@
+diff --git a/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+--- a/bsd/dev/sweet_sd.c
++++ b/bsd/dev/sweet_sd.c
+@@ -21,6 +21,9 @@
+ #include <kern/clock.h>
+ #include <kern/kalloc.h>
+ #include <kern/sched_prim.h>
++#include <kern/processor.h>
+ #include <kern/thread.h>
++extern processor_t cpu_to_processor(int);
++extern processor_t thread_bind(processor_t);
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+@@ -223,11 +226,25 @@ sweet_sd_log_thread(__unused void *arg, __unused wait_result_t wr)
+ 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
+ 	if (!on) return;
+ 	PE_parse_boot_argn("sweetlogsecs", &sweet_sd_log_secs, sizeof(sweet_sd_log_secs));
+ 	if (!sweet_sd_log_secs || sweet_sd_log_secs > 30) sweet_sd_log_secs = 1;
++	uint32_t selected_cpus = 1;
++	PE_parse_boot_argn("cpus", &selected_cpus, sizeof(selected_cpus));
++	if (selected_cpus >= 8) {
++		(void)thread_bind(cpu_to_processor(7));
++		kprintf("SWEET WATCHDOG: SD log writer pinned to CPU 7\n");
++	} else {
++		kprintf("SWEET WATCHDOG: SD log writer unbound (cpus=%u)\n", selected_cpus);
++	}
+ 	printf("SWEET LOG SD: writing the console ring to SCORPION:/XNU.LOG every %u s\n",
+ 	    sweet_sd_log_secs);
++	uint32_t watchdog_ticks = 0;
+ 	for (;;) {
+ 		(void)tsleep(&sweet_sd_log_chan, PZERO, "sweetlogsd", hz * (int)sweet_sd_log_secs);
++		if (++watchdog_ticks >= ((10 + sweet_sd_log_secs - 1) / sweet_sd_log_secs)) {
++			watchdog_ticks = 0;
++			kprintf("SWEET WATCHDOG: cpu=%u SD log worker alive position=%llu\n",
++			    (unsigned int)cpu_number(), (unsigned long long)sweet_log_position());
++		}
+ 		uint64_t total = sweet_log_position();
+ 		uint64_t oldest = total > SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : 0;
+ 		if (readpos < oldest) readpos = oldest;
