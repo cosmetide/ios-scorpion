@@ -1,4 +1,30 @@
 ﻿# iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+## X670 SD bring-up continuation (2026-11-21)
+
+- User reports that iOS boots with one CPU and GPU disabled; enabling multiple
+  CPUs freezes, enabling GPU hides the Apple logo, and touch/volume work.
+- Commit `30ccf5b` adds an opt-in SD-log heartbeat and binds the existing SD log
+  worker to CPU 7 when `cpus=8`. GitHub Actions run `44852261384` succeeded.
+  The `sd-ro` shim now requests `cpus=8 sweetlog=1 sweetlogsecs=1`, leaves GPU
+  disabled, and uses `SCORPION_BOOT`. This is instrumentation/configuration;
+  it does not establish that SMP is stable. The worker starts only after SD
+  root discovery, so it cannot capture a hang during early CPU startup. It is
+  a log heartbeat, not a hardware reset watchdog.
+- Built `shim/out/viva-boot.img` from the Actions kernel artifact and the stock
+  X670 boot image. SHA256:
+  `0E8809D9674DCB641D6FE7EEE37211ABB5B1B60E00B3402F846D4C4AB8C846A5`.
+- Downloaded and checksum-verified the Apple-hosted iPhone X iOS 16.5 (20F66)
+  IPSW; its OS, SystemOS, and AppOS images are extracted under the local
+  `Hackios-work/dmgs` directory, outside Git. The local `iosroot.img` is not
+  complete yet; assembling it requires HFS+ mounting support in WSL.
+- The target SD is Windows Disk 2 (`Generic- SD/MMC`, 127,865,454,592 bytes,
+  D:, exFAT). Its visible contents were backed up to the local work directory
+  (118 bytes). The card has not been repartitioned or written. Phone internal
+  storage has not been accessed.
+- Latest available X670 U-Boot artifact is downloaded locally, but this work
+  has not installed U-Boot to the phone. The SD boot procedure assumes U-Boot
+  is already present and booting from FAT; no phone boot/CPU stability test
+  has been performed in this continuation.
 
 ## Active device port: Infinix Note 12 G96 (X670, MT6781)
 
