@@ -9,6 +9,8 @@
 # device /private/preboot is its own volume holding the cryptexes, which
 # /System/Cryptexes/{OS,App} link to; here they live inside the one volume.
 # Owners, modes, symlinks and hard links are preserved (rsync -aH as root).
+# For APFS readers with better compression support, the three IOSROOT_*_MOUNT
+# variables can point to already-mounted OS, SystemOS, and AppOS volumes.
 #
 # The volume is journaled (XNU replays the journal after a panic; Linux only
 # mounts it read-write with -o force and leaves the journal empty). SWEET
@@ -24,7 +26,11 @@ os=$(realpath "$1") sysos=$(realpath "$2") appos=$(realpath "$3") out=$4 size=${
 
 # Pre-flight tool check
 missing_tools=()
-for tool in apfs-fuse mkfs.hfsplus rsync; do
+required_tools=(mkfs.hfsplus rsync)
+if [[ -z ${IOSROOT_OS_MOUNT:-} || -z ${IOSROOT_SYSOS_MOUNT:-} || -z ${IOSROOT_APPOS_MOUNT:-} ]]; then
+	required_tools+=(apfs-fuse)
+fi
+for tool in "${required_tools[@]}"; do
 	command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
 done
 
@@ -59,10 +65,22 @@ trap cleanup EXIT
 
 # apfs-fuse splits its options on ',' (e.g. in iPhone10,3 paths): use links.
 # Keep the .dmg name: apfs-fuse only parses UDIF images (the OS one is UDIF,
-# the cryptexes are raw APFS) when the file name ends in .dmg.
+# the cryptexes are raw APFS) when the file name ends in .dmg. Pre-mounted
+# volumes are bind-mounted into the same work paths instead.
 apfs_mount() {
 	ln -s "$1" "$work/$2.dmg"
 	mkdir "$work/$2"
+	local mount_src=
+	case "$2" in
+		os) mount_src=${IOSROOT_OS_MOUNT:-} ;;
+		sysos) mount_src=${IOSROOT_SYSOS_MOUNT:-} ;;
+		appos) mount_src=${IOSROOT_APPOS_MOUNT:-} ;;
+	esac
+	if [[ -n $mount_src ]]; then
+		mount --bind "$mount_src" "$work/$2"
+		mounts+=("$work/$2")
+		return
+	fi
 	# As root: a user's FUSE mount is unreadable to the root rsync below.
 	sudo "$(command -v apfs-fuse)" "$work/$2.dmg" "$work/$2"
 	mounts+=("$work/$2")

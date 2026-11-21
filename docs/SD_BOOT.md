@@ -42,12 +42,17 @@ preallocated FAT log file instead of the viva USB link.
    `xnu.yml` GitHub Actions workflow.
 2. Build `iosroot.img` from the local iOS 16.5 OS and cryptex DMGs using
    `tools/viva-build-iosroot.sh`. It requires Linux `apfs-fuse`, `hfsprogs`,
-   `rsync`, loop mounts, and root privileges.
+   `rsync`, loop mounts, and root privileges. If `apfs-fuse` cannot decode a
+   compressed file, mount the IPSW's `fs`, `sys`, and `app` images with `ipsw`
+   and set `IOSROOT_OS_MOUNT`, `IOSROOT_SYSOS_MOUNT`, and `IOSROOT_APPOS_MOUNT`
+   to those mount points when running `tools/mkiosroot.sh`.
 3. Rebuild the SD-root shim boot image with
    `VIVA_DEV=x670 tools/viva-mkboot.sh KERNEL STOCK_BOOT_IMG sd-ro`, then copy
    `shim/out/viva-boot.img` to `scorpion-boot.img`.
-4. Build the X670 U-Boot artifact from `scorpion-uboot`. Its `build-x670.yml`
-   workflow applies patches 0001 through 0015.
+4. Build the X670 U-Boot artifact from `scorpion-uboot`. Its build workflow
+   initializes MSDC1, scans the root of the first FAT partition for the first
+   regular `.img` file, and starts it with `bootm`; it does not show a boot
+   device chooser. Keep only `scorpion-boot.img` in that directory.
 
 ## Write the removable card
 

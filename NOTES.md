@@ -5,26 +5,26 @@
   CPUs freezes, enabling GPU hides the Apple logo, and touch/volume work.
 - Commit `30ccf5b` adds an opt-in SD-log heartbeat and binds the existing SD log
   worker to CPU 7 when `cpus=8`. GitHub Actions run `44852261384` succeeded.
-  The `sd-ro` shim now requests `cpus=8 sweetlog=1 sweetlogsecs=1`, leaves GPU
-  disabled, and uses `SCORPION_BOOT`. This is instrumentation/configuration;
-  it does not establish that SMP is stable. The worker starts only after SD
-  root discovery, so it cannot capture a hang during early CPU startup. It is
-  a log heartbeat, not a hardware reset watchdog.
-- Built `shim/out/viva-boot.img` from the Actions kernel artifact and the stock
-  X670 boot image. SHA256:
-  `0E8809D9674DCB641D6FE7EEE37211ABB5B1B60E00B3402F846D4C4AB8C846A5`.
+  The eight-CPU build hung at U-Boot's `Starting kernel ...` screen on the
+  handset. A one-CPU recovery shim is now on the card, with GPU disabled;
+  its SHA256 is `F431F86EC296BE45E4C76195162C3B77CEF2E1F7E37C0BCD2AC965BE84E000F3`.
+  The watchdog/log worker starts only after SD root discovery, so it cannot
+  capture an early SMP hang. It is a log heartbeat, not a hardware reset
+  watchdog.
+- Normal fastboot accepted the U-Boot image in `boot_a` while the bootloader
+  reported locked. No unlock or bypass was used. The phone has not yet been
+  confirmed to boot successfully from this slot.
 - Downloaded and checksum-verified the Apple-hosted iPhone X iOS 16.5 (20F66)
   IPSW; its OS, SystemOS, and AppOS images are extracted under the local
-  `Hackios-work/dmgs` directory, outside Git. The local `iosroot.img` is not
-  complete yet; assembling it requires HFS+ mounting support in WSL.
-- The target SD is Windows Disk 2 (`Generic- SD/MMC`, 127,865,454,592 bytes,
-  D:, exFAT). Its visible contents were backed up to the local work directory
-  (118 bytes). The card has not been repartitioned or written. Phone internal
-  storage has not been accessed.
-- Latest available X670 U-Boot artifact is downloaded locally, but this work
-  has not installed U-Boot to the phone. The SD boot procedure assumes U-Boot
-  is already present and booting from FAT; no phone boot/CPU stability test
-  has been performed in this continuation.
+  `Hackios-work/dmgs` directory, outside Git. The completed 16 GiB HFS+ root
+  image was written to SD and passed `fsck.hfsplus -f -n`; sampled regions
+  matched the source after a previous interrupted write was replaced.
+- The SD is Windows Disk 2 (`Generic- SD/MMC`, 127,865,454,592 bytes): GPT,
+  1 GiB FAT32 `SCORPION` plus 16 GiB HFS+ `iosroot`. The FAT partition contains
+  `scorpion-boot.img` (one-CPU recovery build, GPU off) and a preallocated
+  4,198,400-byte `XNU.LOG`. The boot image hash on the FAT partition matches
+  the local build. The eight-CPU boot attempt did not reach userspace; the
+  one-CPU recovery image has not yet been retested in the handset.
 
 ## Active device port: Infinix Note 12 G96 (X670, MT6781)
 
